@@ -91,22 +91,33 @@ from bson.objectid import ObjectId
 from .mongo import get_db
 
 def spotify_login(request):
-    # CSRF protection for OAuth redirect
+    # Generate state and store in session
     state = uuid.uuid4().hex
     request.session["spotify_oauth_state"] = state
 
-    scopes = os.environ.get("SPOTIFY_SCOPES", SPOTIFY_SCOPES_DEFAULT)
+    client_id = os.environ.get("SPOTIFY_CLIENT_ID")
+    redirect_uri = os.environ.get("SPOTIFY_REDIRECT_URI")
+    scopes = os.environ.get("SPOTIFY_SCOPES", "playlist-modify-public playlist-modify-private user-read-email")
+
+    missing = [k for k,v in {
+        "SPOTIFY_CLIENT_ID": client_id, 
+        "SPOTIFY_REDIRECT_URI": redirect_uri
+    }.items() if not v]
+    if missing:
+        return HttpResponse(
+            f"Missing required env var(s): {', '.join(missing)}", status=500
+        )
+
     params = {
-        "client_id": os.environ["SPOTIFY_CLIENT_ID"],
+        "client_id": client_id,
         "response_type": "code",
-        "redirect_uri": os.environ["SPOTIFY_REDIRECT_URI"],
+        "redirect_uri": redirect_uri,
         "scope": scopes,
         "state": state,
         "show_dialog": "false",
     }
     url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode(params)
     return redirect(url)
-
 
 def _spotify_token_exchange(code: str):
     data = {
