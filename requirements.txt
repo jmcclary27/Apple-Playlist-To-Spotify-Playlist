@@ -1,0 +1,17 @@
+# --- Web framework and server ---
+Django>=5.0,<5.1
+gunicorn>=21.2
+whitenoise>=6.6
+
+# --- HTTP & OAuth (Spotify auth flow) ---
+requests>=2.31
+requests-oauthlib>=2.0
+
+# --- Apple Music developer token (ES256 JWT signing) ---
+PyJWT[crypto]>=2.8   # pulls in 'cryptography' for ES256
+
+# --- Env management (local dev only; Render uses real env vars) ---
+python-dotenv>=1.0
+
+# --- Optional: caching layer (MongoDB Atlas) ---
+pymongo[srv]>=4.6
