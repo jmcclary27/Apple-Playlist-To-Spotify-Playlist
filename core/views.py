@@ -1,7 +1,7 @@
 import os, io, urllib.parse, base64, datetime, math, json, re
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render, redirect
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from .parsers import parse_apple_xml, parse_m3u
 from .mongo import get_db, ensure_indexes
 import time
@@ -20,18 +20,37 @@ def health(request):
 FORM_HTML = """
 <h1>Upload Apple Playlist</h1>
 <p>Export from Apple Music/iTunes: File → Library → Export Playlist… (choose XML or M3U/M3U8).</p>
-<form method="POST" enctype="multipart/form-data">
+<form id="upl" method="POST" enctype="multipart/form-data">
   <input type="file" name="playlist" accept=".xml,.m3u,.m3u8" required />
   <input type="text" name="name" placeholder="New Spotify playlist name" required />
   <button type="submit">Upload</button>
 </form>
+<script>
+  function getCookie(name) {
+    const value = `; ${document.cookie}`;
+    const parts = value.split(`; ${name}=`);
+    if (parts.length === 2) return parts.pop().split(';').shift();
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    const form = document.getElementById('upl');
+    const token = getCookie('csrftoken');
+    if (token) {
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'csrfmiddlewaretoken';
+      input.value = token;
+      form.appendChild(input);
+    }
+  });
+</script>
 """
 
 SPOTIFY_SCOPES_DEFAULT = "playlist-modify-private playlist-modify-public user-read-email"
 
+@ensure_csrf_cookie
 def upload_playlist(request):
     if request.method == "GET":
-        return render(request, "upload.html")
+        return HttpResponse(FORM_HTML)
     f = request.FILES.get("playlist")
     name = (request.POST.get("name") or "Imported from Apple Music").strip()[:100]
     if not f:
