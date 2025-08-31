@@ -4,6 +4,11 @@ from django.shortcuts import render, redirect
 from django.views.decorators.csrf import csrf_exempt
 from .parsers import parse_apple_xml, parse_m3u
 from .mongo import get_db, ensure_indexes
+import time
+import uuid
+import requests  # you already import below, ok if duplicated once
+from pymongo import ReturnDocument
+
 
 def index(request):
     return HttpResponse("It works! 🎉")
@@ -21,6 +26,8 @@ FORM_HTML = """
   <button type="submit">Upload</button>
 </form>
 """
+
+SPOTIFY_SCOPES_DEFAULT = "playlist-modify-private playlist-modify-public user-read-email"
 
 def upload_playlist(request):
     if request.method == "GET":
@@ -65,14 +72,22 @@ from bson.objectid import ObjectId
 from .mongo import get_db
 
 def spotify_login(request):
+    # CSRF protection for OAuth redirect
+    state = uuid.uuid4().hex
+    request.session["spotify_oauth_state"] = state
+
+    scopes = os.environ.get("SPOTIFY_SCOPES", SPOTIFY_SCOPES_DEFAULT)
     params = {
         "client_id": os.environ["SPOTIFY_CLIENT_ID"],
         "response_type": "code",
         "redirect_uri": os.environ["SPOTIFY_REDIRECT_URI"],
-        "scope": os.environ.get("SPOTIFY_SCOPES", "playlist-modify-public playlist-modify-private"),
+        "scope": scopes,
+        "state": state,
+        "show_dialog": "false",
     }
     url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode(params)
     return redirect(url)
+
 
 def _spotify_token_exchange(code: str):
     data = {
@@ -85,6 +100,76 @@ def _spotify_token_exchange(code: str):
     r = requests.post("https://accounts.spotify.com/api/token", data=data, timeout=20)
     r.raise_for_status()
     return r.json()  # {access_token, token_type, scope, expires_in, refresh_token?}
+
+def _tokens_col():
+    return get_db().spotify_tokens
+
+def _now_ts():
+    return int(time.time())
+
+_EXP_BUFFER = 60  # refresh 1 min before actual expiry
+
+def _save_tokens(spotify_user_id: str, access_token: str, refresh_token: str | None, expires_in: int):
+    expires_at = _now_ts() + int(expires_in) - _EXP_BUFFER
+    update = {
+        "$set": {
+            "spotify_user_id": spotify_user_id,
+            "access_token": access_token,
+            "expires_at": expires_at,
+            "updated_at": datetime.datetime.utcnow(),
+        }
+    }
+    if refresh_token:
+        update["$set"]["refresh_token"] = refresh_token
+    _tokens_col().update_one({"spotify_user_id": spotify_user_id}, update, upsert=True)
+
+def _get_tokens(spotify_user_id: str):
+    return _tokens_col().find_one({"spotify_user_id": spotify_user_id})
+
+def _is_expired(doc: dict | None) -> bool:
+    if not doc:
+        return True
+    return doc.get("expires_at", 0) <= _now_ts()
+
+def _refresh_access_token(spotify_user_id: str) -> str:
+    doc = _get_tokens(spotify_user_id)
+    if not doc or not doc.get("refresh_token"):
+        raise RuntimeError("No refresh token available")
+
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": doc["refresh_token"],
+        "client_id": os.environ["SPOTIFY_CLIENT_ID"],
+        "client_secret": os.environ["SPOTIFY_CLIENT_SECRET"],
+    }
+    r = requests.post("https://accounts.spotify.com/api/token", data=data, timeout=20)
+    r.raise_for_status()
+    payload = r.json()  # contains access_token, expires_in, and sometimes refresh_token
+
+    new_access = payload["access_token"]
+    new_refresh = payload.get("refresh_token") or doc["refresh_token"]
+    _save_tokens(spotify_user_id, new_access, new_refresh, payload["expires_in"])
+    return new_access
+
+def _get_valid_access_token(spotify_user_id: str) -> str:
+    doc = _get_tokens(spotify_user_id)
+    if _is_expired(doc):
+        return _refresh_access_token(spotify_user_id)
+    return doc["access_token"]
+
+def _spotify_api(spotify_user_id: str, method: str, path: str, **kwargs):
+    """Spotify API call with auto-refresh and single retry on 401."""
+    base = "https://api.spotify.com/v1"
+    token = _get_valid_access_token(spotify_user_id)
+    headers = kwargs.pop("headers", {})
+    headers["Authorization"] = f"Bearer {token}"
+    r = requests.request(method, base + path, headers=headers, timeout=20, **kwargs)
+    if r.status_code == 401:
+        token = _refresh_access_token(spotify_user_id)
+        headers["Authorization"] = f"Bearer {token}"
+        r = requests.request(method, base + path, headers=headers, timeout=20, **kwargs)
+    r.raise_for_status()
+    return r.json() if r.content else {}
 
 def _spotify_me(access_token: str):
     r = requests.get("https://api.spotify.com/v1/me",
@@ -142,12 +227,16 @@ def _add_tracks(access_token: str, playlist_id: str, uris: list[str]):
         r.raise_for_status()
 
 def spotify_callback(request):
-    code = request.GET.get("code")
-    if not code:
-        err = request.GET.get("error") or "Missing code"
-        return HttpResponse(f"Spotify returned error: {err}", status=400)
+    # Handle OAuth errors
+    if "error" in request.GET:
+        return HttpResponse(f"Spotify returned error: {request.GET.get('error')}", status=400)
 
-    # Make sure we have something to convert
+    code = request.GET.get("code")
+    state = request.GET.get("state")
+    if not code or not state or state != request.session.get("spotify_oauth_state"):
+        return HttpResponse("State mismatch or missing code.", status=400)
+
+    # Ensure we have something to convert
     items = request.session.get("parsed_items") or []
     name = request.session.get("playlist_name") or "Imported from Apple Music"
     if not items:
@@ -158,18 +247,29 @@ def spotify_callback(request):
     at = tok["access_token"]
     me = _spotify_me(at)
     user_id = me["id"]
+    request.session["spotify_user_id"] = user_id
 
-    # 2) Create empty playlist
-    r = requests.post(f"https://api.spotify.com/v1/users/{user_id}/playlists",
-                      headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
-                      json={"name": name, "public": False, "description": "Imported from Apple Music"},
-                      timeout=20)
+    # Persist tokens for refresh
+    _save_tokens(
+        spotify_user_id=user_id,
+        access_token=at,
+        refresh_token=tok.get("refresh_token"),
+        expires_in=tok["expires_in"],
+    )
+
+    # 2) Create empty playlist (use auto-refresh wrapper for all subsequent calls if you like)
+    r = requests.post(
+        f"https://api.spotify.com/v1/users/{user_id}/playlists",
+        headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
+        json={"name": name, "public": False, "description": "Imported from Apple Music"},
+        timeout=20,
+    )
     r.raise_for_status()
     playlist = r.json()
     playlist_id = playlist["id"]
     playlist_url = playlist.get("external_urls", {}).get("spotify", "")
 
-    # 3) Match each track
+    # 3) Match each track with raw token (ok), or use _spotify_api for retries
     matched_ids, misses = [], []
     for idx, it in enumerate(items):
         tid = _search_best(at, it)
@@ -178,7 +278,7 @@ def spotify_callback(request):
         else:
             misses.append({"idx": idx, **it})
 
-    # 4) Add matches to playlist
+    # 4) Add matches to playlist (raw token is fine; you can switch to refreshable flow later)
     if matched_ids:
         _add_tracks(at, playlist_id, matched_ids)
 
@@ -200,7 +300,7 @@ def spotify_callback(request):
             m["conversion_id"] = cid
         db.unmatched.insert_many(misses)
 
-    # 6) Clear session (we're done with the upload) and show results
+    # 6) Clear the upload session and show results
     request.session.pop("parsed_items", None)
     request.session.pop("playlist_name", None)
     return redirect("conversion_detail", cid=str(cid))
@@ -230,3 +330,14 @@ def conversion_detail(request, cid: str):
     else:
         html += "<p>All tracks matched. 🎉</p>"
     return HttpResponse(html)
+
+def me(request):
+    spotify_user_id = request.session.get("spotify_user_id")
+    if not spotify_user_id:
+        return HttpResponse("Not logged in. Go to /preview and click Sign in with Spotify.", status=401)
+    profile = _spotify_api(spotify_user_id, "GET", "/me")
+    return HttpResponse(json.dumps({
+        "id": profile.get("id"),
+        "display_name": profile.get("display_name"),
+        "email": profile.get("email"),
+    }), content_type="application/json")
