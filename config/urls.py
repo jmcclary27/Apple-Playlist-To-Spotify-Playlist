@@ -16,10 +16,15 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
-from core.views import index, health
+from core.views import index, health, upload_playlist, preview, spotify_login, spotify_callback, conversion_detail
 
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("", index),
     path("health", health),
+    path("upload", upload_playlist, name="upload"),
+    path("preview", preview, name="preview"),
+    path("auth/spotify/login", spotify_login, name="spotify_login"),
+    path("auth/spotify/callback", spotify_callback, name="spotify_callback"),
+    path("conversion/<str:cid>", conversion_detail, name="conversion_detail"),
 ]
