@@ -16,20 +16,33 @@ from pathlib import Path
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-def split_env(name):
-    v = os.getenv(name, "")
-    return [x.strip() for x in v.replace(",", " ").split() if x.strip()]
+def split_env(name: str, default: str | None = None) -> list[str]:
+    """Read a comma-separated env var into a list, with a fallback default string."""
+    val = os.environ.get(name)
+    if val is None:
+        val = default or ""
+    return [x.strip() for x in val.split(",") if x.strip()]
 
+# Hosts
 ALLOWED_HOSTS = split_env("ALLOWED_HOSTS", "localhost,127.0.0.1")
-RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
-if RENDER_HOST and RENDER_HOST not in ALLOWED_HOSTS:
-    ALLOWED_HOSTS.append(RENDER_HOST)
 
-CSRF_TRUSTED_ORIGINS = split_env("CSRF_TRUSTED_ORIGINS")
+# Render provides this automatically (e.g., "your-app.onrender.com")
+RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+
+# CSRF needs full origins (scheme + host)
+CSRF_TRUSTED_ORIGINS = split_env("CSRF_TRUSTED_ORIGINS", "")
+
 if RENDER_HOST:
+    if RENDER_HOST not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(RENDER_HOST)
     origin = f"https://{RENDER_HOST}"
     if origin not in CSRF_TRUSTED_ORIGINS:
         CSRF_TRUSTED_ORIGINS.append(origin)
+
+# Good practice behind Render’s proxy
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
