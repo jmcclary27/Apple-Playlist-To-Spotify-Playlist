@@ -246,7 +246,6 @@ def _add_tracks(access_token: str, playlist_id: str, uris: list[str]):
         r.raise_for_status()
 
 def spotify_callback(request):
-    # Handle OAuth errors
     if "error" in request.GET:
         return HttpResponse(f"Spotify returned error: {request.GET.get('error')}", status=400)
 
@@ -255,18 +254,20 @@ def spotify_callback(request):
     if not code or not state or state != request.session.get("spotify_oauth_state"):
         return HttpResponse("State mismatch or missing code.", status=400)
 
-    # Ensure we have something to convert
-    items = request.session.get("parsed_items") or []
-    name = request.session.get("playlist_name") or "Imported from Apple Music"
-    if not items:
-        return HttpResponse("Nothing to convert. Please upload your playlist first.", status=400)
-
-    # 1) Tokens + user
+    # Exchange code and save tokens, even if no upload happened
     tok = _spotify_token_exchange(code)
     at = tok["access_token"]
     me = _spotify_me(at)
     user_id = me["id"]
     request.session["spotify_user_id"] = user_id
+    _save_tokens(user_id, at, tok.get("refresh_token"), tok["expires_in"])
+
+    # If no uploaded items, go straight to /me for acceptance testing
+    items = request.session.get("parsed_items") or []
+    name = request.session.get("playlist_name") or "Imported from Apple Music"
+    if not items:
+        return redirect("/me")
+
 
     # Persist tokens for refresh
     _save_tokens(
