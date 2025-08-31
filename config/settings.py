@@ -49,7 +49,8 @@ SESSION_COOKIE_SECURE = True
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-insecure-key")
-DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
+#DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
+DEBUG = os.environ.get("DJANGO_DEBUG") == "1"
 
 # SECURITY WARNING: don't run with debug turned on in production!
 
