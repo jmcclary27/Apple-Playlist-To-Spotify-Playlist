@@ -39,6 +39,8 @@ if RENDER_HOST:
     if origin not in CSRF_TRUSTED_ORIGINS:
         CSRF_TRUSTED_ORIGINS.append(origin)
 
+SESSION_ENGINE = "django.contrib.sessions.backends.signed_cookies"
+
 # Good practice behind Render’s proxy
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 CSRF_COOKIE_SECURE = True
