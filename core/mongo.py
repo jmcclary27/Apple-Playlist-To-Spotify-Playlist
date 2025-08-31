@@ -7,7 +7,7 @@ _client = None  # lazy singleton
 def _client_instance() -> MongoClient:
     global _client
     if _client is None:
-        uri = os.environ.get("MONGO_URI")
+        uri = os.environ.get("MONGODB_URI")
         if not uri:
             # Raise only when someone actually needs the DB
             raise RuntimeError("MONGO_URI is not set")
