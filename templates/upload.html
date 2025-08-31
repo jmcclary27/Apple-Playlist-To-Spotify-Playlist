@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+  <body>
+    <h1>Upload Apple Playlist</h1>
+    <p>Export from Apple Music/iTunes: File → Library → Export Playlist… (choose XML or M3U/M3U8).</p>
+    <form method="POST" enctype="multipart/form-data">
+      {% csrf_token %}
+      <input type="file" name="playlist" accept=".xml,.m3u,.m3u8" required />
+      <input type="text" name="name" placeholder="New Spotify playlist name" required />
+      <button type="submit">Upload</button>
+    </form>
+  </body>
+</html>

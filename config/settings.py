@@ -20,14 +20,23 @@ def split_env(name):
     v = os.getenv(name, "")
     return [x.strip() for x in v.replace(",", " ").split() if x.strip()]
 
+ALLOWED_HOSTS = split_env("ALLOWED_HOSTS", "localhost,127.0.0.1")
+RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+if RENDER_HOST and RENDER_HOST not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(RENDER_HOST)
+
+CSRF_TRUSTED_ORIGINS = split_env("CSRF_TRUSTED_ORIGINS")
+if RENDER_HOST:
+    origin = f"https://{RENDER_HOST}"
+    if origin not in CSRF_TRUSTED_ORIGINS:
+        CSRF_TRUSTED_ORIGINS.append(origin)
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-insecure-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
-ALLOWED_HOSTS = split_env("ALLOWED_HOSTS") or ["localhost", "127.0.0.1"]
-CSRF_TRUSTED_ORIGINS = split_env("CSRF_TRUSTED_ORIGINS") or []
 
 # SECURITY WARNING: don't run with debug turned on in production!
 
@@ -61,7 +70,7 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        "DIRS": [BASE_DIR / "templates"],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [

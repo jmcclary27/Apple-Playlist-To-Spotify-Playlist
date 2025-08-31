@@ -31,7 +31,7 @@ SPOTIFY_SCOPES_DEFAULT = "playlist-modify-private playlist-modify-public user-re
 
 def upload_playlist(request):
     if request.method == "GET":
-        return HttpResponse(FORM_HTML)
+        return render(request, "upload.html")
     f = request.FILES.get("playlist")
     name = (request.POST.get("name") or "Imported from Apple Music").strip()[:100]
     if not f:
