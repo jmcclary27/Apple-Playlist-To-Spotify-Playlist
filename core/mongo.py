@@ -6,7 +6,7 @@ _client = MongoClient(os.environ["MONGO_URI"])
 
 def get_db():
     # Prefer explicit DB name via env
-    name = os.environ.get("MONGODB_NAME")
+    name = os.environ.get("MONGO_DB_NAME")
     if name:
         return _client[name]
 
