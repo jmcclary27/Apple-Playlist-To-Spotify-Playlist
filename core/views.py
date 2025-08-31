@@ -3,7 +3,6 @@ from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render, redirect
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from .parsers import parse_apple_xml, parse_m3u
-from .mongo import get_db, ensure_indexes
 import time
 import uuid
 import requests  # you already import below, ok if duplicated once
@@ -15,6 +14,10 @@ def index(request):
 
 def health(request):
     return HttpResponse("ok")
+
+def _tokens_col():
+    from .mongo import get_db
+    return get_db().spotify_tokens
 
 # Simple in-template HTML to keep it minimal (no separate template files needed)
 FORM_HTML = """
@@ -88,7 +91,6 @@ def preview(request):
 
 import requests
 from bson.objectid import ObjectId
-from .mongo import get_db
 
 def spotify_login(request):
     # Generate state and store in session
@@ -130,9 +132,6 @@ def _spotify_token_exchange(code: str):
     r = requests.post("https://accounts.spotify.com/api/token", data=data, timeout=20)
     r.raise_for_status()
     return r.json()  # {access_token, token_type, scope, expires_in, refresh_token?}
-
-def _tokens_col():
-    return get_db().spotify_tokens
 
 def _now_ts():
     return int(time.time())
@@ -257,6 +256,8 @@ def _add_tracks(access_token: str, playlist_id: str, uris: list[str]):
         r.raise_for_status()
 
 def spotify_callback(request):
+    from .mongo import get_db
+    db = get_db()
     if "error" in request.GET:
         return HttpResponse(f"Spotify returned error: {request.GET.get('error')}", status=400)
 
@@ -337,6 +338,7 @@ def spotify_callback(request):
     return redirect("conversion_detail", cid=str(cid))
 
 def conversion_detail(request, cid: str):
+    from .mongo import get_db
     db = get_db()
     conv = db.conversions.find_one({"_id": ObjectId(cid)})
     if not conv:

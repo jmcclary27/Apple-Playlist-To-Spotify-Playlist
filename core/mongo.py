@@ -2,26 +2,30 @@
 import os
 from pymongo import MongoClient
 
-_client = MongoClient(os.environ["MONGO_URI"])
+_client = None  # lazy singleton
+
+def _client_instance() -> MongoClient:
+    global _client
+    if _client is None:
+        uri = os.environ.get("MONGO_URI")
+        if not uri:
+            # Raise only when someone actually needs the DB
+            raise RuntimeError("MONGO_URI is not set")
+        _client = MongoClient(uri)
+    return _client
 
 def get_db():
-    # Prefer explicit DB name via env
+    client = _client_instance()
+
     name = os.environ.get("MONGO_DB_NAME")
     if name:
-        return _client[name]
+        return client[name]
 
-    # Fallback: try to read default db from URI (only works if /dbname is in the URI)
     try:
-        db = _client.get_default_database()
+        db = client.get_default_database()
     except Exception:
         db = None
-
-    if db is not None:
-        return db
-
-    # Final fallback: hardcoded default
-    return _client["am2spot"]
-
+    return db if db is not None else client["am2spot"]
 
 def ensure_indexes():
     db = get_db()
@@ -30,5 +34,5 @@ def ensure_indexes():
         db.conversions.create_index([("created_at", 1)])
         db.unmatched.create_index([("conversion_id", 1)])
     except Exception:
-        # Index creation should never crash the app
+        # never crash on index creation
         pass
