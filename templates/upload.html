@@ -1,68 +1,112 @@
-<form action="{% url 'upload' %}" method="post">
-  {% csrf_token %}
-  {{ form.as_p }}
-  <button type="submit">Fetch playlist</button>
-</form>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Apple → Spotify: Upload & Match</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; line-height: 1.45; }
+    form { margin-bottom: 1rem; }
+    button { padding: 0.5rem 0.9rem; border-radius: 8px; border: 1px solid #444; cursor: pointer; }
+    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
+    th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; font-size: 0.95rem; }
+    th { background: #f5f5f5; }
+    .btn-row { display: flex; gap: 0.5rem; margin: 0.75rem 0; }
+    pre { background: #111; color: #eee; padding: 1rem; border-radius: 8px; overflow: auto; }
+    .muted { color: #666; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
 
-{% if filename %}
-  <p><strong>Playlist:</strong> {{ filename }} — {{ count_total }} tracks found</p>
-{% endif %}
+  <!-- URL Import Form -->
+  <form action="{% url 'upload' %}" method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">Fetch playlist</button>
+    <span class="muted">Paste an Apple Music playlist URL, then click Fetch.</span>
+  </form>
 
-{% if preview %}
-  <h2>Preview (first 10)</h2>
-  <table>
-    <tr>
-      <th>Title</th><th>Artist</th><th>Album</th><th>ISRC</th><th>Norm Title</th><th>Norm Artist</th>
-    </tr>
-    {% for row in preview %}
-    <tr>
-      <td>{{ row.raw_title }}</td>
-      <td>{{ row.raw_artist }}</td>
-      <td>{{ row.raw_album }}</td>
-      <td>{{ row.raw_isrc }}</td>
-      <td>{{ row.norm_title }}</td>
-      <td>{{ row.norm_artist }}</td>
-    </tr>
-    {% endfor %}
-  </table>
-{% endif %}
+  {% if filename %}
+    <p><strong>Playlist:</strong> {{ filename }}, {{ count_total }} tracks found</p>
+  {% endif %}
 
-{% if uploaded_ok %}
-  <p>{{ track_count }} tracks parsed and cached.</p>
+  {% if preview %}
+    <h2>Preview, first 10</h2>
+    <table>
+      <tr>
+        <th>Title</th><th>Artist</th><th>Album</th><th>ISRC</th><th>Norm Title</th><th>Norm Artist</th>
+      </tr>
+      {% for row in preview %}
+      <tr>
+        <td>{{ row.raw_title }}</td>
+        <td>{{ row.raw_artist }}</td>
+        <td>{{ row.raw_album }}</td>
+        <td>{{ row.raw_isrc }}</td>
+        <td>{{ row.norm_title }}</td>
+        <td>{{ row.norm_artist }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
 
-  <button id="btnSample">Run Sample Match</button>
-  <button id="btnAll">Run Full Match</button>
+  {% if uploaded_ok %}
+    <p><strong>{{ track_count }}</strong> tracks parsed and cached.</p>
 
-  <pre id="out" style="white-space: pre-wrap; background:#111; padding:1rem; border-radius:8px;"></pre>
+    <!-- Simple POST forms (JS intercepts to show JSON inline) -->
+    <div class="btn-row">
+      <form id="match-sample" method="post" action="{% url 'match' %}">
+        {% csrf_token %}
+        <button type="submit">Run Sample Match</button>
+      </form>
 
-  <script>
-    async function postJSON(url) {
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'X-CSRFToken': getCookie('csrftoken') }
-      });
-      // show any non-200s as text for debugging
-      if (!resp.ok) {
-        const txt = await resp.text();
-        return { error: resp.status + ' ' + resp.statusText, body: txt };
+      <form id="match-all" method="post" action="{% url 'match' %}?scope=all">
+        {% csrf_token %}
+        <button type="submit">Run Full Match</button>
+      </form>
+    </div>
+
+    <!-- JSON output area -->
+    <pre id="out" aria-live="polite"></pre>
+
+    <script>
+      // CSRF cookie helper
+      function getCookie(name) {
+        const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+        return m ? m.pop() : '';
       }
-      return resp.json();
-    }
-    function getCookie(name) {
-      const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
-      return m ? m.pop() : '';
-    }
 
-    const out = document.getElementById('out');
-    document.getElementById('btnSample').onclick = async () => {
-      out.textContent = "Running sample match…";
-      const data = await postJSON("{% url 'match' %}");
-      out.textContent = JSON.stringify(data, null, 2);
-    };
-    document.getElementById('btnAll').onclick = async () => {
-      out.textContent = "Running full match…";
-      const data = await postJSON("{% url 'match' %}?scope=all");
-      out.textContent = JSON.stringify(data, null, 2);
-    };
-  </script>
-{% endif %}
+      async function postJSON(url) {
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'X-CSRFToken': getCookie('csrftoken') }
+        });
+        if (!resp.ok) {
+          const text = await resp.text();
+          return { error: resp.status + ' ' + resp.statusText, body: text };
+        }
+        return resp.json();
+      }
+
+      const out = document.getElementById('out');
+      const MATCH_URL = "{% url 'match' %}";
+
+      // Intercept Sample form
+      document.getElementById('match-sample').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        out.textContent = 'Running sample match…';
+        const data = await postJSON(MATCH_URL);
+        out.textContent = JSON.stringify(data, null, 2);
+      });
+
+      // Intercept Full form
+      document.getElementById('match-all').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        out.textContent = 'Running full match…';
+        const data = await postJSON(MATCH_URL + '?scope=all');
+        out.textContent = JSON.stringify(data, null, 2);
+      });
+    </script>
+  {% endif %}
+
+</body>
+</html>

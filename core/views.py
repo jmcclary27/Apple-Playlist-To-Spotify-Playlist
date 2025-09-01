@@ -115,24 +115,41 @@ SPOTIFY_SCOPES_DEFAULT = "playlist-modify-private playlist-modify-public user-re
 
 @ensure_csrf_cookie
 def upload_link(request):
-    if request.method == 'GET':
-        return render(request, 'upload.html', {'form': LinkForm()})
+    if request.method == 'POST':
+        form = LinkForm(request.POST)
+        if not form.is_valid():
+            return HttpResponseBadRequest("Invalid URL.")
 
-    form = LinkForm(request.POST)
-    if not form.is_valid():
-        return HttpResponseBadRequest("Invalid URL.")
+        url = form.cleaned_data['url']
+        try:
+            rows = parse_apple_playlist_from_url(url)  # list[dict] with Title/Artist/Album/ISRC/... 
+        except Exception as e:
+            return HttpResponseBadRequest(f"Error: {e}")
 
-    url = form.cleaned_data['url']
-    try:
-        rows = parse_apple_playlist_from_url(url)
-    except Exception as e:
-        return HttpResponseBadRequest(f"Error: {e}")
+        # Save tracks in session so /match/ can use them
+        request.session["apple_tracks_all"] = rows
+        request.session["apple_tracks_sample"] = rows[:50]
+        # Flags so the template shows the buttons after redirect
+        request.session["show_match_buttons"] = True
+        request.session["track_count"] = len(rows)
+        request.session["last_source"] = "link"
+        request.session.modified = True
+
+        # PRG: redirect so refresh doesn't resubmit POST
+        return redirect("upload")  # make sure your URL name matches (see below)
+
+    # GET: show form + optional preview + match buttons (if flags set)
+    uploaded_ok = request.session.pop("show_match_buttons", False)
+    track_count = request.session.pop("track_count", 0)
+    preview = (request.session.get("apple_tracks_all") or [])[:10]
 
     return render(request, 'upload.html', {
         'form': LinkForm(),
-        'preview': rows[:10],
-        'count_total': len(rows),
-        'filename': url,
+        'preview': preview,
+        'count_total': len(request.session.get("apple_tracks_all") or []),
+        'filename': request.GET.get('url', ''),  # optional
+        'uploaded_ok': uploaded_ok,
+        'track_count': track_count,
     })
 
 def preview(request):
