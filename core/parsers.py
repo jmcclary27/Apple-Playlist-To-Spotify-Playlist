@@ -1,62 +1,85 @@
-import io, re, plistlib
+import re
+import html
+import urllib.parse
+import requests
+from bs4 import BeautifulSoup
 
-def normalize_text(s: str) -> str:
-    s = s or ""
-    s = s.strip()
-    s = re.sub(r"\s+", " ", s)
-    # remove common noise while keeping a copy elsewhere if you want retries later
-    s = re.sub(r"\((feat\.|featuring)[^)]+\)", "", s, flags=re.I)
-    s = re.sub(r"\s*-\s*(remaster(ed)?(\s*\d{4})?|live|mono|stereo)\b.*", "", s, flags=re.I)
-    return s.strip()
+APPLE_PLAYLIST_RE = re.compile(r'^https?://(music|geo)\.apple\.com/[^/]+/playlist/')
 
-def parse_apple_xml(fileobj) -> list[dict]:
-    """Return list of dicts: {title, artist, album, duration_sec}."""
-    pl = plistlib.load(fileobj)
-    tracks_map = pl.get("Tracks", {})
-    playlists = pl.get("Playlists", [])
-    items = []
-    # Exported single playlist usually appears at index 0
-    plist = playlists[0] if playlists else {}
-    for it in plist.get("Playlist Items", []):
-        tid = str(it.get("Track ID"))
-        t = tracks_map.get(tid, {})
-        title = normalize_text(t.get("Name", ""))
-        artist = normalize_text(t.get("Artist", ""))
-        album = normalize_text(t.get("Album", ""))
-        dur_ms = t.get("Total Time")
-        dur = int(round(dur_ms/1000)) if isinstance(dur_ms, int) else None
-        if title and artist:
-            items.append({"title": title, "artist": artist, "album": album, "duration_sec": dur})
-    return items
+def is_apple_playlist_url(url: str) -> bool:
+    return bool(APPLE_PLAYLIST_RE.match(url.strip().lower()))
 
-def parse_m3u(fileobj) -> list[dict]:
-    """Parse M3U/M3U8 with #EXTINF: <secs>,Artist - Title."""
-    raw = fileobj.read()
-    if isinstance(raw, bytes):
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            text = raw.decode("latin-1", errors="replace")
-    else:
-        text = raw
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    items, pending = [], None
-    for ln in lines:
-        if ln.startswith("#EXTINF:"):
-            m = re.match(r"#EXTINF:(-?\d+),(.*)", ln)
-            dur = int(m.group(1)) if m else None
-            meta = (m.group(2) if m else "")
-            # Split "Artist - Title"
-            if " - " in meta:
-                artist, title = meta.split(" - ", 1)
-            else:
-                artist, title = "", meta
-            pending = {"title": normalize_text(title), "artist": normalize_text(artist), "album": "", "duration_sec": dur}
-        elif ln.startswith("#"):
-            continue
-        else:
-            # ln is the media path/URL; we don't actually need it
-            if pending and pending["title"]:
-                items.append(pending)
-            pending = None
-    return items
+def _http_get(url: str, timeout=12) -> str:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    r = requests.get(url, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    return r.text
+
+def _extract_song_urls_from_playlist_html(html_text: str):
+    soup = BeautifulSoup(html_text, 'html.parser')
+    urls = [m.get("content") for m in soup.find_all('meta', {"property": "music:song"}) if m.get("content")]
+    return urls
+
+def _extract_track_id_from_song_url(url: str):
+    q = urllib.parse.urlparse(url).query
+    params = urllib.parse.parse_qs(q)
+    if 'i' in params and params['i']:
+        return params['i'][0]
+    # fallback: last numeric path segment
+    parts = [p for p in urllib.parse.urlparse(url).path.split('/') if p]
+    if parts and parts[-1].isdigit():
+        return parts[-1]
+    return None
+
+def _lookup_tracks_itunes(ids):
+    if not ids:
+        return {}
+    ids_csv = ",".join(ids)
+    url = f"https://itunes.apple.com/lookup?id={ids_csv}"
+    data = requests.get(url, timeout=10).json()
+    return {str(item['trackId']): item for item in data.get('results', []) if 'trackId' in item}
+
+def normalize_title(title: str) -> str:
+    import re, unicodedata
+    if not title: return ''
+    s = unicodedata.normalize('NFKD', title)
+    s = ''.join(c for c in s if not unicodedata.combining(c))
+    s = re.sub(r'\(.*?\)|\[.*?\]', '', s)
+    s = s.lower()
+    s = re.sub(r'[^a-z0-9\s]', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+def normalize_artist(artist: str) -> str:
+    if not artist: return ''
+    s = artist.lower()
+    s = re.sub(r'[^a-z0-9\s&]', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+def parse_apple_playlist_from_url(url: str):
+    if not is_apple_playlist_url(url):
+        raise ValueError("That doesn't look like an Apple Music playlist link.")
+
+    html_text = _http_get(url)
+    song_urls = _extract_song_urls_from_playlist_html(html_text)
+    ids = [tid for su in song_urls if (tid := _extract_track_id_from_song_url(su))]
+    itunes_map = _lookup_tracks_itunes(ids)
+
+    rows = []
+    for tid in ids:
+        meta = itunes_map.get(tid, {})
+        title = meta.get('trackName', '')
+        artist = meta.get('artistName', '')
+        album = meta.get('collectionName', '')
+        isrc = meta.get('isrc', '')
+
+        rows.append({
+            'raw_title': title,
+            'raw_artist': artist,
+            'raw_album': album,
+            'raw_isrc': isrc,
+            'norm_title': normalize_title(title),
+            'norm_artist': normalize_artist(artist),
+        })
+    return rows

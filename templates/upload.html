@@ -1,13 +1,28 @@
-<!doctype html>
-<html>
-  <body>
-    <h1>Upload Apple Playlist</h1>
-    <p>Export from Apple Music/iTunes: File → Library → Export Playlist… (choose XML or M3U/M3U8).</p>
-    <form method="POST" enctype="multipart/form-data">
-      {% csrf_token %}
-      <input type="file" name="playlist" accept=".xml,.m3u,.m3u8" required />
-      <input type="text" name="name" placeholder="New Spotify playlist name" required />
-      <button type="submit">Upload</button>
-    </form>
-  </body>
-</html>
+<form action="{% url 'upload' %}" method="post">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <button type="submit">Fetch playlist</button>
+</form>
+
+{% if filename %}
+  <p><strong>Playlist:</strong> {{ filename }} — {{ count_total }} tracks found</p>
+{% endif %}
+
+{% if preview %}
+  <h2>Preview (first 10)</h2>
+  <table>
+    <tr>
+      <th>Title</th><th>Artist</th><th>Album</th><th>ISRC</th><th>Norm Title</th><th>Norm Artist</th>
+    </tr>
+    {% for row in preview %}
+    <tr>
+      <td>{{ row.raw_title }}</td>
+      <td>{{ row.raw_artist }}</td>
+      <td>{{ row.raw_album }}</td>
+      <td>{{ row.raw_isrc }}</td>
+      <td>{{ row.norm_title }}</td>
+      <td>{{ row.norm_artist }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+{% endif %}

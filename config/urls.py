@@ -14,13 +14,13 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.contrib import admin
 from django.urls import path
 from core import views as core_views
 
 urlpatterns = [
     path("", core_views.index, name="index"),
     path("health", core_views.health, name="health"),
-    path("upload", core_views.upload_playlist, name="upload"),
     path("preview", core_views.preview, name="preview"),
 
     # Spotify OAuth
@@ -30,4 +30,7 @@ urlpatterns = [
     # Simple acceptance-test endpoint
     path("me", core_views.me, name="me"),
     path("conversion/<str:cid>", core_views.conversion_detail, name="conversion_detail"),
+    
+    path('admin/', admin.site.urls),
+    path('upload/', core_views.upload_link, name='upload'),
 ]

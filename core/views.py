@@ -2,7 +2,9 @@ import os, io, urllib.parse, base64, datetime, math, json, re
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render, redirect
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
-from .parsers import parse_apple_xml, parse_m3u
+from django.http import HttpResponseBadRequest
+from .forms import LinkForm
+from .parsers import parse_apple_playlist_from_url
 import time
 import uuid
 import requests  # you already import below, ok if duplicated once
@@ -51,27 +53,26 @@ FORM_HTML = """
 SPOTIFY_SCOPES_DEFAULT = "playlist-modify-private playlist-modify-public user-read-email"
 
 @ensure_csrf_cookie
-def upload_playlist(request):
-    if request.method == "GET":
-        return HttpResponse(FORM_HTML)
-    f = request.FILES.get("playlist")
-    name = (request.POST.get("name") or "Imported from Apple Music").strip()[:100]
-    if not f:
-        return HttpResponseBadRequest("No file uploaded.")
-    fname = f.name.lower()
-    # Parse
-    if fname.endswith(".xml"):
-        items = parse_apple_xml(f.file)
-    elif fname.endswith(".m3u") or fname.endswith(".m3u8"):
-        items = parse_m3u(f.file)
-    else:
-        return HttpResponseBadRequest("Unsupported file type. Use XML or M3U/M3U8.")
-    if not items:
-        return HttpResponseBadRequest("No tracks found in file.")
-    # Save minimal session state for the upcoming Spotify step
-    request.session["parsed_items"] = items
-    request.session["playlist_name"] = name
-    return redirect("preview")
+def upload_link(request):
+    if request.method == 'GET':
+        return render(request, 'upload.html', {'form': LinkForm()})
+
+    form = LinkForm(request.POST)
+    if not form.is_valid():
+        return HttpResponseBadRequest("Invalid URL.")
+
+    url = form.cleaned_data['url']
+    try:
+        rows = parse_apple_playlist_from_url(url)
+    except Exception as e:
+        return HttpResponseBadRequest(f"Error: {e}")
+
+    return render(request, 'upload.html', {
+        'form': LinkForm(),
+        'preview': rows[:10],
+        'count_total': len(rows),
+        'filename': url,
+    })
 
 def preview(request):
     items = request.session.get("parsed_items") or []

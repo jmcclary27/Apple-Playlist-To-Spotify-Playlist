@@ -15,3 +15,7 @@ python-dotenv>=1.0
 
 # --- Optional: caching layer (MongoDB Atlas) ---
 pymongo[srv]>=4.6
+
+# --- Parsing URL links ---
+requests>=2.31
+beautifulsoup4>=4.12
