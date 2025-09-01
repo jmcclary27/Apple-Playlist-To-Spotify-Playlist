@@ -28,6 +28,9 @@ def debug_status(request):
         "app_token_expires_in": (request.session.get("spotify_app_expires_at") or 0) - int(time.time()),
         "allowed_hosts": settings.ALLOWED_HOSTS,
         "csrf_trusted_origins": getattr(settings, "CSRF_TRUSTED_ORIGINS", []),
+        "matched_spotify_ids_count": len(request.session.get("matched_spotify_ids") or []),
+        "matched_scope": request.session.get("matched_scope"),
+        "matched_summary": request.session.get("matched_summary"),
     })
 
 # ---------------------------------------------------------------------
