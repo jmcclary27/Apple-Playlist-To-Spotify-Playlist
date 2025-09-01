@@ -1,6 +1,5 @@
 # core/views.py
 import os, urllib.parse, datetime, json, re, time, uuid
-from threading import Thread
 from uuid import uuid4
 
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
@@ -9,11 +8,11 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST, require_GET
 from django.conf import settings
 import requests
+from bson.objectid import ObjectId
 
 from services.matching_engine import match_tracks
 from .forms import LinkForm
 from .parsers import parse_apple_playlist_from_url
-from bson.objectid import ObjectId
 
 # ---------------------------------------------------------------------
 # Debug: environment / session status
@@ -40,24 +39,17 @@ def landing(request):
 
 # ---------------------------------------------------------------------
 # Spotify token helpers
-# Prefer a valid user token from session; else fall back to app token.
-# (App token = Client Credentials; good for search/matching only.)
 # ---------------------------------------------------------------------
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 
 def _get_user_token_from_session(request):
-    """Return a valid user access token if present & not expired; else None."""
     token = request.session.get("spotify_access_token")
-    expires_at = request.session.get("spotify_expires_at")  # epoch secs
+    expires_at = request.session.get("spotify_expires_at")
     if token and (not expires_at or time.time() < (expires_at - 60)):
         return token
     return None
 
 def _get_app_token(request):
-    """
-    Fetch/cached Client Credentials token in the session.
-    Requires SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET in env.
-    """
     cid = os.environ.get("SPOTIFY_CLIENT_ID")
     csec = os.environ.get("SPOTIFY_CLIENT_SECRET")
     if not (cid and csec):
@@ -89,12 +81,6 @@ def _get_app_token(request):
     return tok
 
 def _get_any_spotify_token(request):
-    """
-    Unified getter used by matching:
-    - Prefer a valid user token from session (if you saved one).
-    - Else fall back to app token (client credentials).
-    Returns token string or None.
-    """
     return _get_user_token_from_session(request) or _get_app_token(request)
 
 # ---------------------------------------------------------------------
@@ -132,7 +118,7 @@ def upload_link(request):
         except Exception as e:
             return HttpResponseBadRequest(f"Error: {e}")
 
-        # Save only what we need
+        # Save only what we need for later steps
         request.session["apple_tracks_all"] = rows
         request.session["playlist_name"] = url or "Imported from Apple Music"
 
@@ -159,20 +145,83 @@ def upload_link(request):
         preview = rows[:10]
         count_total = len(rows)
         filename = request.session.get("playlist_name", "")
-        show_match_button = True  # show the “Run match” button only after fresh upload
+        show_match_button = True  # Show the “Match” button only after fresh upload
 
     return render(request, 'upload.html', {
         'form': LinkForm(),
-        'preview': preview,          # will be [] unless just uploaded
-        'count_total': count_total,  # 0 unless just uploaded
+        'preview': preview,
+        'count_total': count_total,
         'filename': filename,
         'uploaded_ok': show_match_button,
         'track_count': count_total,
     })
 
-def _jobs_col():
-    from .mongo import get_db
-    return get_db().jobs
+# ---------------------------------------------------------------------
+# Matching job flow (single, incremental flow)
+#   /match/start  → creates job with embedded tracks
+#   /match/run    → processes next batch and updates progress
+#   /match/progress/<id> → page that polls /match/run
+#   /match/results/<id>  → final results table
+# ---------------------------------------------------------------------
+def _collect_ids_from_results(payload) -> list[str]:
+    """
+    Extract Spotify track IDs from matcher output
+    and keep only matched/fuzzy_matched; dedupe, preserve order.
+    """
+    ids = []
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        seen = set()
+        for row in payload["results"]:
+            if not isinstance(row, dict):
+                continue
+            if row.get("status") in ("matched", "fuzzy_matched"):
+                tid = row.get("spotify_id")
+                if isinstance(tid, str) and len(tid) == 22 and tid not in seen:
+                    seen.add(tid)
+                    ids.append(tid)
+    return ids
+
+@require_POST
+def match_start(request):
+    """
+    Create a job that *embeds* the current Apple tracks so /match/run
+    never depends on the session. Returns {job_id}.
+    """
+    rows = request.session.get("apple_tracks_all") or []
+    if not isinstance(rows, list) or not rows:
+        return JsonResponse({"error": "No uploaded tracks. Please upload first."}, status=400)
+
+    job_id = uuid4().hex
+    now = datetime.datetime.utcnow()
+
+    # Optionally shrink each track to essentials to keep job doc small
+    def _shrink(t):
+        return {
+            "raw_title":  t.get("raw_title")  or t.get("title"),
+            "raw_artist": t.get("raw_artist") or t.get("artist"),
+            "raw_album":  t.get("raw_album")  or t.get("album"),
+            "raw_isrc":   t.get("raw_isrc"),
+            "duration_sec": t.get("duration_sec"),
+        }
+
+    apple_tracks = [_shrink(t) for t in rows]
+    total = len(apple_tracks)
+
+    _jobs_col().insert_one({
+        "_id": job_id,
+        "status": "running",              # running|done
+        "created_at": now,
+        "updated_at": now,
+        "finished_at": None,
+        "apple_tracks": apple_tracks,     # <— embed tracks here
+        "total": total,
+        "done": 0,
+        "results": [],                    # appended in /match/run
+        "summary": {"matched": 0, "fuzzy_matched": 0, "not_found": 0},
+        "matched_ids": [],
+        "source_name": request.session.get("playlist_name") or "Imported from Apple Music",
+    })
+    return JsonResponse({"job_id": job_id})
 
 @require_POST
 def match_run(request, job_id: str):
@@ -182,24 +231,32 @@ def match_run(request, job_id: str):
         return JsonResponse({"error": "Job not found"}, status=404)
 
     apple_tracks = job.get("apple_tracks") or []
-    total = int(job.get("total") or len(apple_tracks))
+    total = int(job.get("total") or (len(apple_tracks) if isinstance(apple_tracks, list) else 0))
     done = int(job.get("done") or 0)
     done = max(0, min(done, total))
 
-    # Empty/invalid job: don't spin forever
-    if total <= 0 or not apple_tracks:
+    # Recovery: if a job is missing tracks, try to pull from session once
+    if (not apple_tracks) and (total <= 0):
+        sess_rows = request.session.get("apple_tracks_all") or []
+        if isinstance(sess_rows, list) and sess_rows:
+            col.update_one({"_id": job_id}, {"$set": {
+                "apple_tracks": sess_rows, "total": len(sess_rows),
+                "updated_at": datetime.datetime.utcnow()
+            }})
+            apple_tracks = sess_rows
+            total = len(sess_rows)
+
+    if not isinstance(apple_tracks, list) or total <= 0:
         return JsonResponse({"error": "Job has no tracks. Please re-upload."}, status=400)
 
     # Already complete?
     if done >= total:
-        # Ensure DB status says done
         if job.get("status") != "done":
-            col.update_one(
-                {"_id": job_id},
-                {"$set": {"status": "done",
-                          "finished_at": datetime.datetime.utcnow(),
-                          "updated_at": datetime.datetime.utcnow()}}
-            )
+            col.update_one({"_id": job_id}, {"$set": {
+                "status": "done",
+                "finished_at": datetime.datetime.utcnow(),
+                "updated_at": datetime.datetime.utcnow()
+            }})
         return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
 
     # Batch size
@@ -215,15 +272,13 @@ def match_run(request, job_id: str):
     stop = start + take
     slice_tracks = apple_tracks[start:stop]
 
-    # Safety: if slice is empty but not done, mark done to avoid loops.
     if not slice_tracks:
-        col.update_one(
-            {"_id": job_id},
-            {"$set": {"status": "done",
-                      "done": total,
-                      "finished_at": datetime.datetime.utcnow(),
-                      "updated_at": datetime.datetime.utcnow()}}
-        )
+        col.update_one({"_id": job_id}, {"$set": {
+            "status": "done",
+            "done": total,
+            "finished_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow()
+        }})
         return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
 
     # Run matching on this slice
@@ -249,107 +304,32 @@ def match_run(request, job_id: str):
     new_done = min(total, done + processed)
 
     # Update job
-    col.update_one(
-        {"_id": job_id},
-        {
-            "$inc": {
-                "done": processed,
-                "summary.matched": matched_ct,
-                "summary.fuzzy_matched": fuzzy_ct,
-                "summary.not_found": not_ct,
-            },
-            "$push": {"results": {"$each": results}},
-            "$addToSet": {"matched_ids": {"$each": ids_this}},
-            "$set": {"status": "running", "updated_at": datetime.datetime.utcnow()},
-        }
-    )
+    col.update_one({"_id": job_id}, {
+        "$inc": {
+            "done": processed,
+            "summary.matched": matched_ct,
+            "summary.fuzzy_matched": fuzzy_ct,
+            "summary.not_found": not_ct,
+        },
+        "$push": {"results": {"$each": results}},
+        "$addToSet": {"matched_ids": {"$each": ids_this}},
+        "$set": {"status": "running", "updated_at": datetime.datetime.utcnow()},
+    })
 
     status = "done" if new_done >= total else "running"
     if status == "done":
-        col.update_one(
-            {"_id": job_id},
-            {"$set": {"status": "done",
-                      "finished_at": datetime.datetime.utcnow(),
-                      "updated_at": datetime.datetime.utcnow()}}
-        )
+        col.update_one({"_id": job_id}, {"$set": {
+            "status": "done",
+            "finished_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow()
+        }})
 
     return JsonResponse({
         "done": new_done,
         "total": total,
         "status": status,
-        "processed": processed,      # <-- for per-song animation
+        "processed": processed,      # for per-song animation
     })
-
-# ---------------------------------------------------------------------
-# Matching job flow
-# ---------------------------------------------------------------------
-def _collect_ids_from_results(payload) -> list[str]:
-    """
-    Extract Spotify track IDs from matcher output:
-      {"summary": {...}, "results": [ { "status": "...", "spotify_id": "..." }, ... ]}
-    Keep only matched/fuzzy_matched; dedupe, preserve order.
-    """
-    ids = []
-    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
-        seen = set()
-        for row in payload["results"]:
-            if not isinstance(row, dict):
-                continue
-            if row.get("status") in ("matched", "fuzzy_matched"):
-                tid = row.get("spotify_id")
-                if isinstance(tid, str) and len(tid) == 22 and tid not in seen:
-                    seen.add(tid)
-                    ids.append(tid)
-    return ids
-
-@require_POST
-def match_start(request):
-    """Start a background matching job, return job_id."""
-    apple_tracks = request.session.get("apple_tracks_all") or []
-    if not apple_tracks:
-        return JsonResponse({"error": "No tracks found in session. Go back to Upload."}, status=400)
-
-    source_name = request.session.get("playlist_name") or "Imported from Apple Music"
-
-    token = _get_any_spotify_token(request)
-    if not token:
-        return JsonResponse({"error": "Spotify app credential missing (client id/secret)."}, status=500)
-
-    job_id = uuid4().hex
-    now = datetime.datetime.utcnow()
-    _jobs_col().insert_one({
-        "_id": job_id,
-        "status": "queued",
-        "progress": 0,
-        "created_at": now,
-        "updated_at": now,
-        "source_name": source_name,
-        "apple_count": len(apple_tracks),
-        "summary": None,
-        "results": None,
-        "matched_ids": [],
-        "error": None,
-    })
-
-    Thread(target=_run_match_job, args=(job_id, token, apple_tracks), daemon=True).start()
-    return JsonResponse({"job_id": job_id})
-
-def _run_match_job(job_id: str, access_token: str, apple_tracks: list[dict]):
-    col = _jobs_col()
-    def set_state(**kv):
-        kv["updated_at"] = datetime.datetime.utcnow()
-        col.update_one({"_id": job_id}, {"$set": kv})
-
-    try:
-        set_state(status="running", progress=10)
-        data = match_tracks(access_token, apple_tracks, fuzzy_threshold=85)
-        ids = _collect_ids_from_results(data)
-        summary = data.get("summary") if isinstance(data, dict) else None
-        results = data.get("results") if isinstance(data, dict) else data
-        set_state(progress=90)
-        set_state(status="done", progress=100, results=results, summary=summary, matched_ids=ids)
-    except Exception as e:
-        set_state(status="error", error=str(e), progress=100)
 
 @require_GET
 def match_progress_page(request, job_id: str):
@@ -361,20 +341,6 @@ def match_progress_page(request, job_id: str):
     return resp
 
 @require_GET
-def match_status(request, job_id: str):
-    job = _jobs_col().find_one({"_id": job_id}, {"_id": 0})
-    if not job:
-        return JsonResponse({"status": "missing"}, status=404)
-    return JsonResponse({
-        "status": job.get("status"),
-        "progress": int(job.get("progress") or 0),
-        "error": job.get("error"),
-    })
-
-from django.shortcuts import render, redirect
-from django.views.decorators.http import require_GET
-
-@require_GET
 def match_results_page(request, job_id: str):
     job = _jobs_col().find_one({"_id": job_id})
     if not job:
@@ -384,7 +350,7 @@ def match_results_page(request, job_id: str):
     done = int(job.get("done") or 0)
     status = job.get("status") or ("done" if done >= total and total > 0 else "running")
 
-    # 🚦 If the job isn't finished yet, always send user to the progress page
+    # If the job isn't finished yet, redirect to progress page
     if status != "done" or done < total:
         return redirect("match_progress", job_id=job_id)
 
@@ -401,7 +367,6 @@ def match_results_page(request, job_id: str):
         "created": created_flag == "1",
         "playlist_url": playlist_url,
     })
-    # prevent stale renders
     resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp["Pragma"] = "no-cache"
     return resp
@@ -415,8 +380,6 @@ def match_report_csv(request, job_id: str):
     from django.utils.encoding import smart_str
     resp = HttpResponse(content_type="text/csv")
     resp["Content-Disposition"] = f'attachment; filename="match_report_{job_id}.csv"'
-
-    # ⬇️ important: stop repeat downloads and prefetch weirdness
     resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp["Pragma"] = "no-cache"
     resp["Expires"] = "0"
@@ -431,6 +394,21 @@ def match_report_csv(request, job_id: str):
         ])
     return resp
 
+# Optional: quick peek for debugging
+@require_GET
+def match_peek(request, job_id: str):
+    job = _jobs_col().find_one({"_id": job_id}, {"apple_tracks": {"$slice": 1}})
+    if not job:
+        return JsonResponse({"error": "not found"}, status=404)
+    return JsonResponse({
+        "_id": job["_id"],
+        "status": job.get("status"),
+        "total": job.get("total"),
+        "done": job.get("done"),
+        "apple_tracks_type": type(job.get("apple_tracks")).__name__,
+        "apple_tracks_len": len(job.get("apple_tracks") or []),
+    })
+
 # ---------------------------------------------------------------------
 # OAuth + playlist creation (via callback)
 # ---------------------------------------------------------------------
@@ -443,7 +421,7 @@ def spotify_login(request):
 
     job_id = request.GET.get("job_id")
     next_url = request.GET.get("next") or "/"
-    playlist_name = request.GET.get("playlist_name")  # ⬅️ new
+    playlist_name = request.GET.get("playlist_name")
     request.session["oauth_ctx"] = {"job_id": job_id, "next": next_url, "playlist_name": playlist_name}
     request.session.modified = True
 
@@ -566,7 +544,7 @@ def spotify_callback(request):
     ctx = request.session.pop("oauth_ctx", {}) or {}
     job_id = ctx.get("job_id")
     next_url = ctx.get("next") or "/"
-    chosen_name = ctx.get("playlist_name")  # ⬅️ may be None
+    chosen_name = ctx.get("playlist_name")
 
     if job_id:
         job = _jobs_col().find_one({"_id": job_id})
@@ -574,10 +552,9 @@ def spotify_callback(request):
             return redirect(next_url)
 
         matched_ids = job.get("matched_ids") or _collect_ids_from_results({"results": job.get("results") or []})
-        # prefer chosen name, else job source name, else fallback
         name = (chosen_name or job.get("source_name") or "Imported from Apple Music")[:100]
 
-        # Create playlist with 'name'
+        # Create playlist
         r = requests.post(
             f"https://api.spotify.com/v1/users/{user_id}/playlists",
             headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
@@ -589,7 +566,7 @@ def spotify_callback(request):
         playlist_id = playlist["id"]
         playlist_url = playlist.get("external_urls", {}).get("spotify", "")
 
-        # 2) Add tracks in chunks of 100
+        # Add tracks in chunks
         if matched_ids:
             add_url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
             headers = {"Authorization": f"Bearer {at}", "Content-Type": "application/json"}
@@ -601,7 +578,7 @@ def spotify_callback(request):
                     rr = requests.post(add_url, headers=headers, json={"uris": [f"spotify:track:{tid}" for tid in chunk]}, timeout=25)
                 rr.raise_for_status()
 
-        # 3) Persist conversion record
+        # Persist conversion record
         _conversions_col().insert_one({
             "created_at": datetime.datetime.utcnow(),
             "spotify_user_id": user_id,
