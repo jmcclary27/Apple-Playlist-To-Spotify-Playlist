@@ -40,7 +40,7 @@
     </tr>
     {% for r in results %}
       <tr>
-        <td class="{{ 'ok' if r.status != 'not_found' else 'warn' }}">{{ r.status }}</td>
+        <td class="{% if r.status != 'not_found' %}ok{% else %}warn{% endif %}">{{ r.status }}</td>
         <td>{{ r.score }}</td>
         <td>{{ r.raw_title }}</td>
         <td>{{ r.raw_artist }}</td>
