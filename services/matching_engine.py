@@ -85,6 +85,26 @@ class SpotifyClient:
         data = self._request("GET", SPOTIFY_SEARCH_URL, params)
         return (data or {}).get("tracks", {}).get("items", [])
     
+WHITESPACE_RE = re.compile(r"\s+")
+
+def _unify(s: str) -> str:
+    """
+    Light-weight normalization for raw comparisons:
+    - keep apostrophes
+    - normalize curly quotes/dashes
+    - collapse whitespace
+    """
+    if not s:
+        return ""
+    s = (s.replace("’", "'")
+         .replace("‘", "'")
+         .replace("“", '"')
+         .replace("”", '"')
+         .replace("—", " ")
+         .replace("–", " ")
+         .replace("-", " "))
+    return WHITESPACE_RE.sub(" ", s).strip()
+    
 def _field_clause(field: str, value: str) -> str:
     if not value: return ""
     v = value.replace('"', " ").strip()  # strip embedded double quotes
