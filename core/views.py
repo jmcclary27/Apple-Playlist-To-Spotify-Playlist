@@ -118,18 +118,40 @@ def match_view(request):
             pass
 
     if not apple_tracks:
-        return HttpResponseBadRequest("No tracks found. Upload first, or POST a JSON body with {'tracks': [...]}.")
+        return HttpResponseBadRequest(
+            "No tracks found. Upload first, or POST a JSON body with {'tracks': [...]}."
+        )
 
     # Run matcher
     data = match_tracks(access_token, apple_tracks, fuzzy_threshold=85)
 
-    # ✅ Save matched Spotify IDs for the create step
-    ids = _collect_matched_ids(data)
+    # ---- store matched Spotify IDs in the session ----
+    # 1) primary: use your extractor
+    ids = []
+    try:
+        ids = _extract_spotify_ids_from_match_result(data) or []
+    except Exception:
+        ids = []
+
+    # 2) fallback (schema-aware): only keep rows marked matched/fuzzy_matched
+    if not ids and isinstance(data, dict) and isinstance(data.get("results"), list):
+        seen = set()
+        for row in data["results"]:
+            if not isinstance(row, dict):
+                continue
+            if row.get("status") in ("matched", "fuzzy_matched"):
+                tid = row.get("spotify_id")
+                if isinstance(tid, str) and len(tid) == 22 and tid not in seen:
+                    seen.add(tid)
+                    ids.append(tid)
+
+    # Save to session
     request.session["matched_spotify_ids"] = ids
     request.session["matched_scope"] = scope
     if isinstance(data, dict):
         request.session["matched_summary"] = data.get("summary")
     request.session.modified = True
+    # --------------------------------------------------
 
     return JsonResponse(data, safe=False)
 
