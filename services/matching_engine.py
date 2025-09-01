@@ -271,7 +271,8 @@ def match_one_track(
 
     # --- raw fields (preserve punctuation for search strength) ---
     title  = _get(track, "Title", "title")
-    artist = _get(track, "Artist", "artist")
+    # include raw artist aliases so we *always* have an artist for per-artist queries
+    artist = _get(track, "Artist", "artist", "Raw Artist", "raw_artist")
     album  = _get(track, "Album", "album", "Album Name", "album_name", "Raw Album", "raw_album")
     isrc   = (_get(track, "ISRC", "isrc") or "").strip()
     dur_ms = track.get("duration_ms")
@@ -365,6 +366,8 @@ def match_one_track(
 
     # Execute with per-variant cache; merge & dedupe
     seen: set = set()
+    tried_norm_ta = False  # <-- ensure we don't bail before trying at least one high-precision query
+
     for key_prefix, q in query_variants:
         qkey = f"{key_prefix}|{q}"
         got = cache.get(qkey)
@@ -373,13 +376,18 @@ def match_one_track(
             cache[qkey] = got
         query_trace.append((key_prefix, len(got or [])))
 
+        if key_prefix.startswith("q:norm_t+a:"):
+            tried_norm_ta = True
+
         if got:
             for c in got:
                 cid = c.get("id")
                 if cid and cid not in seen:
                     seen.add(cid)
                     candidates.append(c)
-        if len(candidates) >= 15:
+
+        # only allow early break once we've executed a normalized title+artist query at least once
+        if len(candidates) >= 15 and tried_norm_ta:
             break
 
     # ---------------- 2a) RAW exact short-circuit (prefer precise versions) ----------------
@@ -457,6 +465,10 @@ def match_one_track(
 
             # weighted overall score
             overall = round(0.55 * s_title + 0.35 * s_artist + 0.10 * s_album)
+
+            # guardrail: wrong-title-but-same-album tends to sneak in; deflate obviously low title similarity
+            if s_title < 60:
+                overall -= 10
             
             # Tiny bonus when the title is essentially exact and primary is present
             if s_title >= 99 and primary_present:
@@ -569,7 +581,7 @@ def normalized_triplet_from_track(track: Dict[str, Any]) -> tuple[str, str, str]
     na_pre = _get(track, "Norm Artist", "norm_artist", default=None)
 
     title_raw  = _get(track, "Title", "title")
-    artist_raw = _get(track, "Artist", "artist")
+    artist_raw = _get(track, "Artist", "artist", "Raw Artist", "raw_artist")
     album_raw  = _get(track, "Album", "album", "Album Name", "album_name", "Raw Album", "raw_album")
 
     nt = nt_pre.strip().lower() if isinstance(nt_pre, str) and nt_pre.strip() else normalize_title(title_raw)
