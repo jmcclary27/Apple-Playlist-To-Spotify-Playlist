@@ -43,22 +43,33 @@ def normalize_artist(artist: str) -> str:
 
 import re, unicodedata
 
-ALBUM_STRIP_RE = re.compile(
-    (
-        r"\s*[([{]\s*(?:"
-        r"deluxe|expanded|bonus|remaster(?:ed)?(?:\s+\d{2,4})?|"
-        r"anniversary|edition|single|explicit|clean|commentary|instrumental|"
-        r"live|demo|reissue|super\s*deluxe|special\s*edition"
-        r")[^)\]}]*[)\]}]"
-    ),
-    flags=re.IGNORECASE,
+import unicodedata
+
+ALBUM_EDITION_RE = re.compile(
+    r"""\s*[\(\[\{]\s*(?:deluxe|expanded|bonus|remaster(?:ed)?(?:\s+\d{2,4})?|
+        anniversary|edition|single|explicit|clean|commentary|instrumental|
+        live|demo|reissue|super\s*deluxe|special\s*edition)[^)\]\}]*[\)\]\}]""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+ALBUM_TRAILING_TAG_RE = re.compile(
+    r"""\s*-\s*(?:remaster(?:ed)?(?:\s*\d{2,4})?|live|mono|stereo|
+        single\s*version|radio\s*edit|deluxe|explicit|clean)\b.*$""",
+    re.IGNORECASE | re.VERBOSE,
 )
 
 def normalize_album(s: str) -> str:
+    """Normalize album names without nuking real titles."""
     if not s:
         return ""
-    s = unicodedata.normalize("NFKC", s)
-    s = ALBUM_STRIP_RE.sub("", s)
+    s = unicodedata.normalize("NFKC", s).replace("’", "'")
+    # remove common edition tags in (), [], {}
+    s = ALBUM_EDITION_RE.sub("", s)
+    # strip trailing "- Remastered 2011" / "- Deluxe" etc.
+    s = ALBUM_TRAILING_TAG_RE.sub("", s)
+    # normalize separators and dotted acronyms to match title behavior
+    s = s.replace("—", " ").replace("–", " ").replace("-", " ")
+    s = re.sub(r"[.\u00B7]", " ", s)  # m.a.a.d -> m a a d
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
@@ -546,16 +557,6 @@ def _get(d, *names, default=""):
             return v if v is not None else default
     return default
 
-def normalize_album(album: str) -> str:
-    if not album:
-        return ""
-    a = album
-    a = PARENS_RE.sub(" ", a)
-    a = SUFFIXES_RE.sub("", a)
-    a = a.replace("—", " ").replace("-", " ")
-    a = WHITESPACE_RE.sub(" ", a).strip().lower()
-    return a
-
 # --- helper: combine title/artist/album normalization in one place ---
 def normalized_triplet_from_track(track: Dict[str, Any]) -> tuple[str, str, str]:
     """
@@ -574,6 +575,8 @@ def normalized_triplet_from_track(track: Dict[str, Any]) -> tuple[str, str, str]
     nt = nt_pre.strip().lower() if isinstance(nt_pre, str) and nt_pre.strip() else normalize_title(title_raw)
     na = na_pre.strip().lower() if isinstance(na_pre, str) and na_pre.strip() else normalize_artist(artist_raw)
     nb = normalize_album(album_raw)
+    
+    return nt, na, nb
 
 # ---------- Batch runner with throttling and caching ----------
 
