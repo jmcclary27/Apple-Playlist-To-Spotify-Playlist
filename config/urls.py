@@ -39,6 +39,7 @@ urlpatterns = [
     path("me", core_views.me, name="me"),
     path("conversion/<str:cid>", core_views.conversion_detail, name="conversion_detail"),
     path("debug/status", core_views.debug_status, name="debug_status"),
+    path("match/run/<str:job_id>", core_views.match_run, name="match_run"),
 
     path("admin/", admin.site.urls),
 ]

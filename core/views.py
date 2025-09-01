@@ -170,6 +170,73 @@ def upload_link(request):
         'track_count': count_total,
     })
 
+def _jobs_col():
+    from .mongo import get_db
+    return get_db().jobs
+
+@require_POST
+def match_run(request, job_id: str):
+    """
+    Process the next N tracks of a job and update progress.
+    The client calls this repeatedly until status == 'done'.
+    """
+    job = _jobs_col().find_one({"_id": job_id})
+    if not job:
+        return JsonResponse({"error": "Job not found"}, status=404)
+    access_token = _get_any_spotify_token(request)
+    if not access_token:
+        return JsonResponse({"error": "Spotify credentials missing"}, status=400)
+
+    apple_tracks = job.get("apple_tracks") or []
+    total = job.get("total") or len(apple_tracks)
+    done = int(job.get("done") or 0)
+    if done >= total:
+        return JsonResponse({"done": done, "total": total, "status": "done"})
+
+    batch = max(1, min( int(request.GET.get("batch") or 10), 100 ))
+    slice_tracks = apple_tracks[done:done+batch]
+    if not slice_tracks:
+        _jobs_col().update_one({"_id": job_id}, {"$set": {"status": "done", "finished_at": datetime.datetime.utcnow()}})
+        return JsonResponse({"done": done, "total": total, "status": "done"})
+
+    # Run matcher on this slice
+    data = match_tracks(access_token, slice_tracks, fuzzy_threshold=85)
+    results = data["results"] if isinstance(data, dict) and isinstance(data.get("results"), list) else (data or [])
+
+    # Count statuses
+    matched_ct = sum(1 for r in results if r.get("status") == "matched")
+    fuzzy_ct   = sum(1 for r in results if r.get("status") == "fuzzy_matched")
+    not_ct     = sum(1 for r in results if r.get("status") == "not_found")
+
+    # Extract IDs to add later
+    ids_this = []
+    for r in results:
+        tid = r.get("spotify_id")
+        if isinstance(tid, str) and len(tid) == 22:
+            ids_this.append(tid)
+
+    # Update job doc
+    _jobs_col().update_one(
+        {"_id": job_id},
+        {
+            "$inc": {
+                "done": len(slice_tracks),
+                "summary.matched": matched_ct,
+                "summary.fuzzy_matched": fuzzy_ct,
+                "summary.not_found": not_ct,
+            },
+            "$push": {"results": {"$each": results}},
+            "$addToSet": {"matched_ids": {"$each": ids_this}},
+            "$set": {"status": "running", "updated_at": datetime.datetime.utcnow()},
+        }
+    )
+
+    done += len(slice_tracks)
+    if done >= total:
+        _jobs_col().update_one({"_id": job_id}, {"$set": {"status": "done", "finished_at": datetime.datetime.utcnow()}})
+
+    return JsonResponse({"done": done, "total": total, "status": "done" if done >= total else "running"})
+
 # ---------------------------------------------------------------------
 # Matching job flow
 # ---------------------------------------------------------------------

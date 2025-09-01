@@ -5,37 +5,87 @@
   <title>Matching…</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+    /* Force light theme */
+    html, body { background:#fff; color:#111; }
     body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; }
-    .bar { height:16px; background:#eee; border-radius:10px; overflow:hidden; }
-    .fill { height:100%; width:0%; background:#111; transition:width .4s ease; }
-    .pct { margin-top:.5rem; color:#555; }
+    .bar-wrap { width:100%; max-width:640px; height:16px; background:#eee; border-radius:999px; overflow:hidden; border:1px solid #ddd; }
+    .bar { height:100%; width:0%; background:#0a7a0a; transition: width .25s ease; }
+    .row { display:flex; align-items:center; gap:1rem; margin-top:.75rem; }
+    .muted { color:#666; }
   </style>
 </head>
-<body>
+<body
+  data-job-id="{{ job_id }}"
+  data-total="{{ total|default:0 }}"
+>
+  <a href="{% url 'landing' %}">← Home</a>
   <h1>Matching your playlist…</h1>
-  <div class="bar"><div id="fill" class="fill"></div></div>
-  <div id="pct" class="pct">0%</div>
+
+  <div class="bar-wrap" aria-hidden="true"><div id="bar" class="bar"></div></div>
+  <div class="row">
+    <div id="pct"><strong>0%</strong></div>
+    <div class="muted" id="counts"></div>
+  </div>
+
+  <p class="muted">Please keep this tab open while we match tracks.</p>
+
   <script>
-    const jobId = "{{ job_id }}";
-    async function poll() {
-      try {
-        const r = await fetch(`/api/match/status/${jobId}`);
-        const j = await r.json();
-        const pct = Math.max(0, Math.min(100, j.progress || 0));
-        document.getElementById('fill').style.width = pct + '%';
-        document.getElementById('pct').textContent = pct + '%';
-        if (j.status === 'done') {
-          window.location.href = `/match/results/${jobId}`;
-        } else if (j.status === 'error') {
-          alert('Matching failed: ' + (j.error || 'unknown error'));
-        } else {
-          setTimeout(poll, 800);
-        }
-      } catch(e) {
-        setTimeout(poll, 1200);
-      }
+    // ---- CSRF helper for POST ----
+    function getCookie(name) {
+      const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+      return m ? decodeURIComponent(m.pop()) : '';
     }
-    poll();
+
+    (function () {
+      const jobId = document.body.dataset.jobId || '';
+      const totalCount = Number(document.body.dataset.total || '0') || 0;
+
+      // UI refs
+      const bar = document.getElementById('bar');
+      const pct = document.getElementById('pct');
+      const counts = document.getElementById('counts');
+
+      // Initial counts text
+      counts.textContent = `0 / ${totalCount || '?'}`;
+
+      const BATCH_SIZE = 10; // adjust if you want bigger steps
+
+      async function step() {
+        const url = `/match/run/${encodeURIComponent(jobId)}?batch=${BATCH_SIZE}`;
+        const resp = await fetch(url, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'X-CSRFToken': getCookie('csrftoken') }
+        });
+        if (!resp.ok) throw new Error('step failed: ' + resp.status);
+        const data = await resp.json();
+
+        const done = Number(data.done || 0);
+        const total = Number(data.total || totalCount || 1);
+
+        const p = Math.floor((done / total) * 100);
+        bar.style.width = p + '%';
+        pct.innerHTML = `<strong>${p}%</strong>`;
+        counts.textContent = `${done} / ${total}`;
+
+        if (done >= total || data.status === 'done') {
+          // Jump to results page
+          window.location.href = `/match/results/${encodeURIComponent(jobId)}?created=0`;
+          return;
+        }
+        // Queue next batch with a tiny delay so the browser can paint
+        setTimeout(step, 150);
+      }
+
+      if (!jobId) {
+        alert('Missing job id. Please start the match again.');
+        return;
+      }
+      step().catch((e) => {
+        console.error(e);
+        alert('Matching failed. Please try again.');
+      });
+    })();
   </script>
 </body>
 </html>
