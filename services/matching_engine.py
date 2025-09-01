@@ -19,16 +19,19 @@ SUFFIXES_RE = re.compile(r"\s*-\s*(remaster(ed)?(\s*\d{2,4})?|live|mono|stereo|s
 FEAT_RE = re.compile(r"\s*\bfeat\.?.*|\s*\bft\.?.*", re.I)
 WHITESPACE_RE = re.compile(r"\s+")
 
-def normalize_title(title: str) -> str:
-    if not title:
-        return ""
-    t = title
-    t = PARENS_RE.sub(" ", t)            # drop things in parentheses
-    t = FEAT_RE.sub(" ", t)              # drop “feat. …”
-    t = SUFFIXES_RE.sub("", t)           # drop “- remaster”, “- live”, etc.
-    t = t.replace("—", " ").replace("-", " ")
-    t = WHITESPACE_RE.sub(" ", t).strip().lower()
-    return t
+import re, unicodedata
+
+def normalize_title(s: str) -> str:
+    s = (s or "").lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = s.replace("’", "'")
+    # m.a.a.d -> m a a d ; also handle middle dot
+    s = re.sub(r"[.\u00B7]", " ", s)
+    # drop (feat ...)/(with ...) in the title itself
+    s = re.sub(r"\s*\((feat|with)[^)]+\)", "", s)
+    s = re.sub(r"[^a-z0-9'\s]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 def normalize_artist(artist: str) -> str:
     if not artist:
@@ -154,6 +157,13 @@ def score_candidate(apple_title: str, apple_artist: str, sp: dict) -> Tuple[int,
         "overall": overall,
     }
     return overall, debug
+
+def _primary_in_artists(apple_artist_norm: str, sp_artists: list) -> bool:
+    # sp_artists is the Spotify "artists" array
+    sp_names = ", ".join(a["name"] for a in (sp_artists or []) if a.get("name"))
+    a_set = set((apple_artist_norm or "").split())
+    sp_set = set(normalize_artist(sp_names).split())
+    return bool(a_set) and a_set.issubset(sp_set)
 
 # ---------- Matching pipeline per track ----------
 
@@ -406,9 +416,19 @@ def match_one_track(
             s_title  = fuzz.token_set_ratio(nt, normalize_title(sp_title))
             s_artist = fuzz.token_set_ratio(na, normalize_artist(sp_artists))
             s_album  = fuzz.token_set_ratio(nb, _norm_album_local(sp_album)) if nb else 0
+            
+            primary_present = _primary_in_artists(na, c.get("artists"))
+
+            # If the primary artist is present, don't let extra features tank us
+            if primary_present and s_artist < 95:
+                s_artist = max(s_artist, 95)
 
             # weighted overall score
             overall = round(0.55 * s_title + 0.35 * s_artist + 0.10 * s_album)
+            
+            # Tiny bonus when the title is essentially exact and primary is present
+            if s_title >= 99 and primary_present:
+                overall += 3
 
             # tiny bonus if normalized titles match exactly
             if normalize_title(sp_title) == nt:
@@ -446,6 +466,7 @@ def match_one_track(
                     "spotify_title_norm": normalize_title(sp_title),
                     "spotify_artist_norm": normalize_artist(sp_artists),
                     "spotify_album_norm": _norm_album_local(sp_album),
+                    "primary_present": primary_present,
                     "title_score": s_title,
                     "artist_score": s_artist,
                     "album_score": s_album,
