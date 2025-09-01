@@ -41,6 +41,33 @@ def normalize_artist(artist: str) -> str:
     a = WHITESPACE_RE.sub(" ", a).strip().lower()
     return a
 
+import re, unicodedata
+
+def normalize_album(s: str) -> str:
+    s = (s or "").lower()
+    s = unicodedata.normalize("NFKD", s)
+    s = s.replace("’", "'").replace("&", " and ")
+    # turn dotted acronyms into spaced letters: m.a.a.d -> m a a d
+    s = re.sub(r"[.\u00B7]", " ", s)
+    # remove (feat/with ...) segments if present in album field
+    s = re.sub(r"\s*[\(\[\{]?(feat\.?|with)\s+[^)\]\}]+[\)\]\}]?", "", s)
+    # remove packaging/edition tags in parentheses/brackets
+    s = re.sub(
+        r"\s*[\(\[\{]\s*(deluxe|expanded|bonus|remaster(ed)?(\s+\d{2,4})?|"
+        r"anniversary|edition|single|explicit|clean|commentary|instrumental|"
+        r"live|demo|reissue|super\s*deluxe|special\s*edition)[^)\]\}]*[\)\]\}]",
+        "",
+        s,
+    )
+    # strip non-alnum, collapse spaces
+    s = re.sub(r"[^a-z0-9'\s]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # if what's left is too generic, don’t use album matching
+    if s in {"", "single", "ep", "album", "deluxe", "expanded", "bonus", "remaster", "remastered"}:
+        return ""
+    return s
+
 def canonical_key(title: str, artist: str) -> str:
     return f"{normalize_title(title)}|{normalize_artist(artist)}"
 
@@ -536,23 +563,14 @@ def normalize_album(album: str) -> str:
     return a
 
 # --- helper: combine title/artist/album normalization in one place ---
-def normalized_triplet_from_track(track: Dict[str, Any]) -> tuple[str, str, str]:
-    """
-    Returns (nt, na, nb) = normalized title, artist, album.
-    Prefers your precomputed columns 'Norm Title' and 'Norm Artist' if present/non-empty.
-    Falls back to normalize_* helpers otherwise.
-    """
-    # prefer your precomputed columns if they exist and are non-empty
-    nt_pre = _get(track, "Norm Title", "norm_title", default=None)
-    na_pre = _get(track, "Norm Artist", "norm_artist", default=None)
+def normalized_triplet_from_track(track):
+    raw_title  = _get(track, "Norm Title", "NormTitle", "Title", "title") or ""
+    raw_artist = _get(track, "Norm Artist", "NormArtist", "Artist", "artist") or ""
+    raw_album  = _get(track, "Album", "album") or _get(track, "Collection", "collection") or ""
 
-    title_raw  = _get(track, "Title", "title")
-    artist_raw = _get(track, "Artist", "artist")
-    album_raw  = _get(track, "Album", "album")
-
-    nt = nt_pre.strip().lower() if isinstance(nt_pre, str) and nt_pre.strip() else normalize_title(title_raw)
-    na = na_pre.strip().lower() if isinstance(na_pre, str) and na_pre.strip() else normalize_artist(artist_raw)
-    nb = normalize_album(album_raw)
+    nt = normalize_title(raw_title)
+    na = normalize_artist(raw_artist)
+    nb = normalize_album(raw_album)  # <-- don’t forget this
 
     return nt, na, nb
 
