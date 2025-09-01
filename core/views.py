@@ -311,9 +311,11 @@ def _run_match_job(job_id: str, access_token: str, apple_tracks: list[dict]):
 @require_GET
 def match_progress_page(request, job_id: str):
     job = _jobs_col().find_one({"_id": job_id})
-    if not job:
-        return HttpResponse("Job not found", status=404)
-    return render(request, "match_progress.html", {"job_id": job_id})
+    total = int(job.get("total", 0)) if job else 0
+    resp = render(request, "match_progress.html", {"job_id": job_id, "total": total})
+    resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp["Pragma"] = "no-cache"
+    return resp
 
 @require_GET
 def match_status(request, job_id: str):
@@ -326,29 +328,40 @@ def match_status(request, job_id: str):
         "error": job.get("error"),
     })
 
+from django.shortcuts import render, redirect
+from django.views.decorators.http import require_GET
+
 @require_GET
 def match_results_page(request, job_id: str):
     job = _jobs_col().find_one({"_id": job_id})
     if not job:
         return HttpResponse("Job not found.", status=404)
+
+    total = int(job.get("total") or 0)
+    done = int(job.get("done") or 0)
+    status = job.get("status") or ("done" if done >= total and total > 0 else "running")
+
+    # 🚦 If the job isn't finished yet, always send user to the progress page
+    if status != "done" or done < total:
+        return redirect("match_progress", job_id=job_id)
+
     results = job.get("results") or []
-    created = request.GET.get("created") == "1"
-    playlist_url = request.GET.get("playlist_url") or ""
-    summary = job.get("summary") or {
-        "matched": sum(1 for r in results if r.get("status") in ("matched", "fuzzy_matched")),
-        "fuzzy_matched": sum(1 for r in results if r.get("status") == "fuzzy_matched"),
-        "not_found": sum(1 for r in results if r.get("status") == "not_found"),
-        "total": len(results),
-    }
-    return render(request, "match_results.html", {
-        "request": request,
+    summary = job.get("summary") or {"matched": 0, "fuzzy_matched": 0, "not_found": 0}
+    created_flag = request.GET.get("created")
+    playlist_url = request.GET.get("playlist_url", "")
+
+    resp = render(request, "match_results.html", {
         "job_id": job_id,
-        "results": results[:1000],
+        "results": results,
         "summary": summary,
-        "created": created,
+        "source_name": job.get("source_name") or "Imported from Apple Music",
+        "created": created_flag == "1",
         "playlist_url": playlist_url,
-        "source_name": job.get("source_name") or "Imported from Apple Music",  # ⬅️
     })
+    # prevent stale renders
+    resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp["Pragma"] = "no-cache"
+    return resp
 
 @require_GET
 def match_report_csv(request, job_id: str):

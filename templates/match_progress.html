@@ -4,33 +4,33 @@
   <meta charset="utf-8" />
   <title>Matching…</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Prevent dark-mode inversion + caching -->
+  <meta name="color-scheme" content="light only">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
   <style>
-    /* Force light theme */
     html, body { background:#fff; color:#111; }
     body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; }
     .bar-wrap { width:100%; max-width:640px; height:16px; background:#eee; border-radius:999px; overflow:hidden; border:1px solid #ddd; }
     .bar { height:100%; width:0%; background:#0a7a0a; transition: width .25s ease; }
     .row { display:flex; align-items:center; gap:1rem; margin-top:.75rem; }
     .muted { color:#666; }
+    .error { color:#b00020; margin-top: 1rem; }
   </style>
 </head>
-<body
-  data-job-id="{{ job_id }}"
-  data-total="{{ total|default:0 }}"
->
+<body data-job-id="{{ job_id }}" data-total="{{ total|default:0 }}">
   <a href="{% url 'landing' %}">← Home</a>
   <h1>Matching your playlist…</h1>
 
   <div class="bar-wrap" aria-hidden="true"><div id="bar" class="bar"></div></div>
   <div class="row">
     <div id="pct"><strong>0%</strong></div>
-    <div class="muted" id="counts"></div>
+    <div class="muted" id="counts">0 / {{ total|default:"?" }}</div>
   </div>
-
   <p class="muted">Please keep this tab open while we match tracks.</p>
+  <div id="err" class="error" role="alert" style="display:none;"></div>
 
   <script>
-    // ---- CSRF helper for POST ----
     function getCookie(name) {
       const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
       return m ? decodeURIComponent(m.pop()) : '';
@@ -38,17 +38,22 @@
 
     (function () {
       const jobId = document.body.dataset.jobId || '';
-      const totalCount = Number(document.body.dataset.total || '0') || 0;
+      let totalCount = Number(document.body.dataset.total || '0') || 0;
 
-      // UI refs
       const bar = document.getElementById('bar');
       const pct = document.getElementById('pct');
       const counts = document.getElementById('counts');
+      const err = document.getElementById('err');
 
-      // Initial counts text
-      counts.textContent = `0 / ${totalCount || '?'}`;
+      const BATCH_SIZE = 10;
 
-      const BATCH_SIZE = 10; // adjust if you want bigger steps
+      function paint(done, total) {
+        const t = total || totalCount || 1;
+        const p = Math.floor((done / t) * 100);
+        bar.style.width = p + '%';
+        pct.innerHTML = `<strong>${p}%</strong>`;
+        counts.textContent = `${done} / ${t}`;
+      }
 
       async function step() {
         const url = `/match/run/${encodeURIComponent(jobId)}?batch=${BATCH_SIZE}`;
@@ -57,33 +62,37 @@
           credentials: 'same-origin',
           headers: { 'X-CSRFToken': getCookie('csrftoken') }
         });
-        if (!resp.ok) throw new Error('step failed: ' + resp.status);
+
+        if (!resp.ok) {
+          const txt = await resp.text();
+          throw new Error(txt || ('HTTP ' + resp.status));
+        }
+
         const data = await resp.json();
-
         const done = Number(data.done || 0);
-        const total = Number(data.total || totalCount || 1);
+        if ((data.total || 0) > 0) totalCount = Number(data.total);
+        const total = totalCount > 0 ? totalCount : (Number(data.total || 0) || 1);
 
-        const p = Math.floor((done / total) * 100);
-        bar.style.width = p + '%';
-        pct.innerHTML = `<strong>${p}%</strong>`;
-        counts.textContent = `${done} / ${total}`;
+        paint(done, total);
 
-        if (done >= total || data.status === 'done') {
-          // Jump to results page
+        // ✅ Only leave when server says done AND we actually finished all items
+        if (data.status === 'done' && total > 0 && done >= total) {
           window.location.href = `/match/results/${encodeURIComponent(jobId)}?created=0`;
           return;
         }
-        // Queue next batch with a tiny delay so the browser can paint
         setTimeout(step, 150);
       }
 
       if (!jobId) {
-        alert('Missing job id. Please start the match again.');
+        err.textContent = 'Missing job id. Please start the match again.';
+        err.style.display = 'block';
         return;
       }
+
       step().catch((e) => {
         console.error(e);
-        alert('Matching failed. Please try again.');
+        err.textContent = 'Matching failed: ' + (e.message || 'Unknown error');
+        err.style.display = 'block';
       });
     })();
   </script>
