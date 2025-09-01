@@ -84,6 +84,30 @@ class SpotifyClient:
         params = {"q": q or (title + " " + artist), "type": "track", "limit": 10}
         data = self._request("GET", SPOTIFY_SEARCH_URL, params)
         return (data or {}).get("tracks", {}).get("items", [])
+    
+def _field_clause(field: str, value: str) -> str:
+    if not value: return ""
+    v = value.replace('"', " ").strip()  # strip embedded double quotes
+    return f'{field}:"{v}"' if v else ""
+
+_SEP_RE = re.compile(r"\s*(?:,|&|/|;|\+| x | × | with | and | vs\.?)\s*", re.I)
+def _artist_variants(artist_raw: str) -> list[str]:
+    base = (artist_raw or "").strip()
+    out, seen = [], set()
+    if base:
+        n = normalize_artist(base)
+        if n and n not in seen:
+            seen.add(n); out.append(base)
+    trimmed = re.sub(r"\s+(?:feat|ft)\.?\s+.*$", "", base, flags=re.I).strip()
+    if trimmed and normalize_artist(trimmed) not in seen:
+        seen.add(normalize_artist(trimmed)); out.append(trimmed)
+    for piece in _SEP_RE.split(trimmed or base):
+        p = piece.strip()
+        if not p: continue
+        n = normalize_artist(p)
+        if n and n not in seen:
+            seen.add(n); out.append(p)
+    return out[:5]
 
 # ---------- Fuzzy scoring ----------
 
@@ -172,49 +196,94 @@ def match_one_track(
     if raw_album:  parts.append(f'album:"{raw_album}"')
     if parts: query_variants.append(("q:raw_t+a+b", " ".join(parts)))
 
-    # 2) RAW fielded title+artist
-    parts = []
-    if raw_title:  parts.append(f'track:"{raw_title}"')
-    if raw_artist: parts.append(f'artist:"{raw_artist}"')
-    if parts: query_variants.append(("q:raw_t+a", " ".join(parts)))
+    # ---------------- 2) Structured search (RAW first, multi-artist aware) ----------------
+    raw_title, raw_artist, raw_album = title, artist, album
+    candidates: List[dict] = []
+    query_trace: List[Tuple[str, int]] = []  # optional for debugging
 
-    # 3) NORMALIZED fielded with album
-    parts = []
-    if nt: parts.append(f'track:"{nt}"')
-    if na: parts.append(f'artist:"{na}"')
-    if nb: parts.append(f'album:"{nb}"')
-    if parts: query_variants.append(("q:norm_t+a+b", " ".join(parts)))
+    def do_search(q: str, limit: int = 50) -> List[dict]:
+        data = sp._request("GET", SPOTIFY_SEARCH_URL, {"q": q, "type": "track", "limit": limit})
+        return (data or {}).get("tracks", {}).get("items", [])
 
-    # 4) NORMALIZED fielded title+artist
-    parts = []
-    if nt: parts.append(f'track:"{nt}"')
-    if na: parts.append(f'artist:"{na}"')
-    if parts: query_variants.append(("q:norm_t+a", " ".join(parts)))
+    artist_try = _artist_variants(raw_artist)
+    if not artist_try:
+        artist_try = [raw_artist] if raw_artist else []
 
-    # 5) RAW free-text fallback
+    query_variants: List[Tuple[str, str]] = []
+
+    # Per-artist passes (best-first)
+    for a_raw in artist_try:
+        # 1) RAW title+artist
+        q = " ".join(x for x in [_field_clause("track", raw_title), _field_clause("artist", a_raw)] if x)
+        if q: query_variants.append((f"q:raw_t+a:{a_raw}", q))
+
+        # 2) NORMALIZED title+artist
+        a_norm = normalize_artist(a_raw)
+        q = " ".join(x for x in [_field_clause("track", nt), _field_clause("artist", a_norm)] if x)
+        if q: query_variants.append((f"q:norm_t+a:{a_norm}", q))
+
+        # 3) RAW track-only (artist omitted)
+        q = _field_clause("track", raw_title)
+        if q: query_variants.append(("q:raw_t_only", q))
+
+    # Album-aware passes
+    q = " ".join(x for x in [_field_clause("track", raw_title), _field_clause("artist", raw_artist), _field_clause("album", raw_album)] if x)
+    if q: query_variants.append(("q:raw_t+a+b", q))
+
+    q = " ".join(x for x in [_field_clause("track", nt), _field_clause("artist", na), _field_clause("album", nb)] if x)
+    if q: query_variants.append(("q:norm_t+a+b", q))
+
+    # Free-text fallback
     ft = " ".join(x for x in [raw_title, raw_artist] if x).strip()
-    if ft:
-        query_variants.append(("q:raw_free", ft))
+    if ft: query_variants.append(("q:raw_free", ft))
 
-    # Execute ladder with per-variant cache; merge & dedupe by id
+    # Execute with per-variant cache; merge & dedupe
     seen: set = set()
     for key_prefix, q in query_variants:
         qkey = f"{key_prefix}|{q}"
         got = cache.get(qkey)
         if got is None:
-            got = do_search(q, limit=20)
+            got = do_search(q, limit=50)
             cache[qkey] = got
+        query_trace.append((key_prefix, len(got or [])))
+
         if got:
             for c in got:
                 cid = c.get("id")
                 if cid and cid not in seen:
                     seen.add(cid)
                     candidates.append(c)
-        # stop early once we have a decent pool
-        if len(candidates) >= 12:
+        if len(candidates) >= 15:
             break
 
-    # ---------------- 2a) Quick normalized exact-ish check ----------------
+    # ---------------- 2a) RAW exact short-circuit (prefer precise versions) ----------------
+    if candidates:
+        u_raw_title  = _unify(raw_title or "").strip().lower()
+        u_raw_artist = normalize_artist(raw_artist or "")
+        u_raw_album  = _unify(raw_album or "").strip().lower()
+
+        for c in candidates:
+            u_sp_title = _unify(c.get("name", "")).strip().lower()
+            if u_sp_title == u_raw_title:
+                sp_art = ", ".join(a["name"] for a in c.get("artists", []) if a.get("name"))
+                if normalize_artist(sp_art) == u_raw_artist:
+                    sp_album = (c.get("album") or {}).get("name", "")
+                    if not u_raw_album or _unify(sp_album).strip().lower() == u_raw_album:
+                        return {
+                            "status": "matched",
+                            "spotify_id": c["id"],
+                            "method": "query_exact_raw",
+                            "score": 99,
+                            "debug": {
+                                "reason": "raw title/artist (and album) exact",
+                                "spotify_name": c.get("name"),
+                                "artists": [a["name"] for a in c.get("artists", [])],
+                                "album": (c.get("album") or {}).get("name"),
+                                "query_trace": query_trace,  # optional
+                            },
+                        }
+
+    # ---------------- 2b) Quick normalized exact-ish check ----------------
     if candidates:
         for c in candidates:
             if normalize_title(c.get("name", "")) == nt:
@@ -233,43 +302,45 @@ def match_one_track(
                         },
                     }
 
-    # ---------------- 3) Fuzzy ranking with album + duration tie-breaks ----------------
+    # ---------------- 3) Fuzzy ranking with SAFE tie-breaks ----------------
     if candidates:
         best = None
         best_score = -1
-        best_dbg: Dict[str, Any] = {}
+        best_dbg = {}
 
         for c in candidates:
-            sp_title   = c.get("name", "")
-            sp_artists = ", ".join(a["name"] for a in c.get("artists", []) if a.get("name")) if c.get("artists") else ""
-            sp_album   = (c.get("album") or {}).get("name", "")
-            sp_dur     = c.get("duration_ms")
+            sp_title   = c.get("name", "") or ""
+            sp_artists = ", ".join(a["name"] for a in (c.get("artists") or []) if a.get("name"))
+            sp_album   = (c.get("album") or {}).get("name", "") or ""
+            sp_dur     = c.get("duration_ms")  # may be None
 
             s_title  = fuzz.token_set_ratio(nt, normalize_title(sp_title))
             s_artist = fuzz.token_set_ratio(na, normalize_artist(sp_artists))
             s_album  = fuzz.token_set_ratio(nb, normalize_album(sp_album)) if nb else 0
 
-            # Weighted blend
+            # weighted overall score
             overall = round(0.55 * s_title + 0.35 * s_artist + 0.10 * s_album)
 
-            # tiny bonus if normalized titles are exact
+            # tiny bonus if normalized titles match exactly
             if normalize_title(sp_title) == nt:
                 overall += 1
 
-            # tiny duration bonus if within ±3s
-            dur_bonus = 0
-            if isinstance(dur_ms, int) and isinstance(sp_dur, int) and abs(dur_ms - sp_dur) <= 3000:
-                dur_bonus = 3
-                overall += dur_bonus
+            # duration deltas may be None -> handle safely
+            dur_delta_ms = None if (track.get("duration_ms") is None or sp_dur is None) else abs(track["duration_ms"] - sp_dur)
+            dur_bonus = 3 if isinstance(dur_delta_ms, int) and dur_delta_ms <= 3000 else 0
+            overall += dur_bonus
 
-            dur_delta = abs((dur_ms or 10**9) - (sp_dur or 10**9))
-            tie_key = (overall, s_album, -dur_delta)  # prefer better score, album, then closer duration
+            # ---- SAFE tie-break values ----
+            album_score_for_tie = s_album if isinstance(s_album, (int, float)) else 0
+            dur_delta_for_tie   = dur_delta_ms if isinstance(dur_delta_ms, int) else 10**9
 
-            prev_key = (
-                best_score,
-                best_dbg.get("album_score", -1),
-                -best_dbg.get("duration_delta_ms", 10**9),
-            )
+            tie_key = (overall, album_score_for_tie, -dur_delta_for_tie)
+
+            prev_album_score = best_dbg.get("album_score", 0) or 0
+            prev_dur_delta   = best_dbg.get("duration_delta_ms", 10**9)
+            if not isinstance(prev_dur_delta, int):
+                prev_dur_delta = 10**9
+            prev_key = (best_score, prev_album_score, -prev_dur_delta)
 
             if (best is None) or (tie_key > prev_key):
                 best = c
@@ -285,7 +356,7 @@ def match_one_track(
                     "artist_score": s_artist,
                     "album_score": s_album,
                     "overall": overall,
-                    "duration_delta_ms": None if (dur_ms is None or sp_dur is None) else abs(dur_ms - sp_dur),
+                    "duration_delta_ms": dur_delta_ms,
                     "duration_bonus": dur_bonus,
                 }
 
@@ -300,9 +371,11 @@ def match_one_track(
                     "spotify_name": best.get("name"),
                     "artists": [a["name"] for a in best.get("artists", [])],
                     "album": (best.get("album") or {}).get("name"),
+                    # (optional) include query_trace if you added it
                     **best_dbg,
                 },
             }
+
 
     # ---------------- Fallback: nothing found ----------------
     return {
@@ -312,7 +385,6 @@ def match_one_track(
         "score": 0,
         "debug": {"reason": "no viable candidates"},
     }
-
 
 # --- add helper to read multiple possible keys (case/space tolerant) ---
 def _get(d, *names, default=""):
