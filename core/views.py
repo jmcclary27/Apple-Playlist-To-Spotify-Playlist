@@ -118,34 +118,30 @@ def upload_link(request):
         except Exception as e:
             return HttpResponseBadRequest(f"Error: {e}")
 
-        # Save only what we need for later steps
+        # Save only what we need for the next steps
         request.session["apple_tracks_all"] = rows
         request.session["playlist_name"] = url or "Imported from Apple Music"
 
         # One-shot flag so GET will show preview exactly once
         request.session["just_uploaded"] = True
 
-        # Clear any old match/session artifacts from previous runs
+        # Clear artifacts from previous runs
         for k in ("matched_spotify_ids", "matched_scope", "matched_summary"):
             request.session.pop(k, None)
 
         request.session.modified = True
         return redirect("upload")
 
-    # GET — default: no preview, no old counts
+    # GET — default: no preview unless we just uploaded
     just_uploaded = request.session.pop("just_uploaded", False)
 
-    preview = []
-    count_total = 0
-    filename = ""
-    show_match_button = False
-
+    preview, count_total, filename, show_match_button = [], 0, "", False
     if just_uploaded:
         rows = request.session.get("apple_tracks_all") or []
         preview = rows[:10]
         count_total = len(rows)
         filename = request.session.get("playlist_name", "")
-        show_match_button = True  # Show the “Match” button only after fresh upload
+        show_match_button = True
 
     return render(request, 'upload.html', {
         'form': LinkForm(),
@@ -157,17 +153,10 @@ def upload_link(request):
     })
 
 # ---------------------------------------------------------------------
-# Matching job flow (single, incremental flow)
-#   /match/start  → creates job with embedded tracks
-#   /match/run    → processes next batch and updates progress
-#   /match/progress/<id> → page that polls /match/run
-#   /match/results/<id>  → final results table
+# Matching job flow (incremental)
 # ---------------------------------------------------------------------
 def _collect_ids_from_results(payload) -> list[str]:
-    """
-    Extract Spotify track IDs from matcher output
-    and keep only matched/fuzzy_matched; dedupe, preserve order.
-    """
+    """Extract Spotify track IDs from matcher output; keep matched/fuzzy; dedupe."""
     ids = []
     if isinstance(payload, dict) and isinstance(payload.get("results"), list):
         seen = set()
@@ -183,18 +172,11 @@ def _collect_ids_from_results(payload) -> list[str]:
 
 @require_POST
 def match_start(request):
-    """
-    Create a job that *embeds* the current Apple tracks so /match/run
-    never depends on the session. Returns {job_id}.
-    """
+    """Create a job that embeds the current Apple tracks so /match/run is stateless."""
     rows = request.session.get("apple_tracks_all") or []
     if not isinstance(rows, list) or not rows:
         return JsonResponse({"error": "No uploaded tracks. Please upload first."}, status=400)
 
-    job_id = uuid4().hex
-    now = datetime.datetime.utcnow()
-
-    # Optionally shrink each track to essentials to keep job doc small
     def _shrink(t):
         return {
             "raw_title":  t.get("raw_title")  or t.get("title"),
@@ -207,19 +189,22 @@ def match_start(request):
     apple_tracks = [_shrink(t) for t in rows]
     total = len(apple_tracks)
 
+    job_id = uuid4().hex
+    now = datetime.datetime.utcnow()
     _jobs_col().insert_one({
         "_id": job_id,
-        "status": "running",              # running|done
+        "status": "running",
         "created_at": now,
         "updated_at": now,
         "finished_at": None,
-        "apple_tracks": apple_tracks,     # <— embed tracks here
+        "apple_tracks": apple_tracks,
         "total": total,
         "done": 0,
-        "results": [],                    # appended in /match/run
+        "results": [],
         "summary": {"matched": 0, "fuzzy_matched": 0, "not_found": 0},
         "matched_ids": [],
         "source_name": request.session.get("playlist_name") or "Imported from Apple Music",
+        "error": None,
     })
     return JsonResponse({"job_id": job_id})
 
@@ -254,6 +239,7 @@ def match_run(request, job_id: str):
         if job.get("status") != "done":
             col.update_one({"_id": job_id}, {"$set": {
                 "status": "done",
+                "done": int(total),
                 "finished_at": datetime.datetime.utcnow(),
                 "updated_at": datetime.datetime.utcnow()
             }})
@@ -275,7 +261,7 @@ def match_run(request, job_id: str):
     if not slice_tracks:
         col.update_one({"_id": job_id}, {"$set": {
             "status": "done",
-            "done": total,
+            "done": int(total),
             "finished_at": datetime.datetime.utcnow(),
             "updated_at": datetime.datetime.utcnow()
         }})
@@ -303,23 +289,23 @@ def match_run(request, job_id: str):
     processed = len(slice_tracks)
     new_done = min(total, done + processed)
 
-    # Update job
+    # Persist this batch (use $set for done to avoid drift)
     col.update_one({"_id": job_id}, {
         "$inc": {
-            "done": processed,
-            "summary.matched": matched_ct,
-            "summary.fuzzy_matched": fuzzy_ct,
-            "summary.not_found": not_ct,
+            "summary.matched": int(matched_ct),
+            "summary.fuzzy_matched": int(fuzzy_ct),
+            "summary.not_found": int(not_ct),
         },
         "$push": {"results": {"$each": results}},
         "$addToSet": {"matched_ids": {"$each": ids_this}},
-        "$set": {"status": "running", "updated_at": datetime.datetime.utcnow()},
+        "$set": {"done": int(new_done), "status": "running", "updated_at": datetime.datetime.utcnow()},
     })
 
     status = "done" if new_done >= total else "running"
     if status == "done":
         col.update_one({"_id": job_id}, {"$set": {
             "status": "done",
+            "done": int(total),
             "finished_at": datetime.datetime.utcnow(),
             "updated_at": datetime.datetime.utcnow()
         }})
@@ -328,7 +314,24 @@ def match_run(request, job_id: str):
         "done": new_done,
         "total": total,
         "status": status,
-        "processed": processed,      # for per-song animation
+        "processed": processed,  # for per-song animation
+    })
+
+@require_GET
+def match_status(request, job_id: str):
+    """Lightweight status endpoint (if your front-end polls it)."""
+    job = _jobs_col().find_one({"_id": job_id})
+    if not job:
+        return JsonResponse({"status": "missing"}, status=404)
+    total = int(job.get("total") or 0)
+    done = int(job.get("done") or 0)
+    pct = 0 if total <= 0 else int(round(100.0 * min(done, total) / float(total)))
+    return JsonResponse({
+        "status": job.get("status") or ("done" if done >= total and total > 0 else "running"),
+        "done": done,
+        "total": total,
+        "progress": pct,
+        "error": job.get("error"),
     })
 
 @require_GET
