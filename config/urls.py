@@ -27,7 +27,6 @@ urlpatterns = [
     # Matching job flow
     path("match/start", core_views.match_start, name="match_start"),  # POST → {job_id}
     path("match/progress/<str:job_id>", core_views.match_progress_page, name="match_progress_page"),  # GET page
-    path("api/match/status/<str:job_id>", core_views.match_status, name="match_status"),  # GET JSON {status,progress}
     path("match/results/<str:job_id>", core_views.match_results_page, name="match_results_page"),  # GET page
     path("api/match/report/<str:job_id>.csv", core_views.match_report_csv, name="match_report_csv"),  # GET CSV
 
