@@ -16,8 +16,9 @@ from pathlib import Path
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+import os
+
 def split_env(name: str, default: str | None = None) -> list[str]:
-    """Read a comma-separated env var into a list, with a fallback default string."""
     val = os.environ.get(name)
     if val is None:
         val = default or ""
@@ -25,12 +26,25 @@ def split_env(name: str, default: str | None = None) -> list[str]:
 
 # Hosts
 ALLOWED_HOSTS = split_env("ALLOWED_HOSTS", "localhost,127.0.0.1")
-
-# Render provides this automatically (e.g., "your-app.onrender.com")
-RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")  # e.g. myapp.onrender.com
+if RENDER_HOST and RENDER_HOST not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(RENDER_HOST)
 
 # CSRF needs full origins (scheme + host)
-CSRF_TRUSTED_ORIGINS = split_env("CSRF_TRUSTED_ORIGINS", "")
+CSRF_TRUSTED_ORIGINS = split_env(
+    "CSRF_TRUSTED_ORIGINS",
+    f"https://{RENDER_HOST}" if RENDER_HOST else ""
+)
+
+# 🔑 Spotify secrets as STRINGS (not lists)
+SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
+SPOTIFY_REDIRECT_URI = os.environ.get("SPOTIFY_REDIRECT_URI")  # e.g. https://<your-app>.onrender.com/auth/spotify/callback
+
+# (Optional but recommended in prod)
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SECURE_SSL_REDIRECT = True
 
 if RENDER_HOST:
     if RENDER_HOST not in ALLOWED_HOSTS:
@@ -43,8 +57,6 @@ SESSION_ENGINE = "django.contrib.sessions.backends.signed_cookies"
 
 # Good practice behind Render’s proxy
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-CSRF_COOKIE_SECURE = True
-SESSION_COOKIE_SECURE = True
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
