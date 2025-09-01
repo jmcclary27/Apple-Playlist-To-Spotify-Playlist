@@ -120,20 +120,18 @@ def match_view(request):
     if not apple_tracks:
         return HttpResponseBadRequest("No tracks found. Upload first, or POST a JSON body with {'tracks': [...]}.")
 
+    # Run matcher
     data = match_tracks(access_token, apple_tracks, fuzzy_threshold=85)
 
-    # NEW: extract spotify IDs and cache for playlist creation
-    try:
-        ids = _extract_spotify_ids_from_match_result(data)
-        request.session["matched_spotify_ids"] = ids
-        request.session["matched_scope"] = scope
-        request.session.modified = True
-    except Exception:
-        # non-fatal; creation endpoint can still accept IDs from POST if you send them
-        pass
+    # ✅ Save matched Spotify IDs for the create step
+    ids = _collect_matched_ids(data)
+    request.session["matched_spotify_ids"] = ids
+    request.session["matched_scope"] = scope
+    if isinstance(data, dict):
+        request.session["matched_summary"] = data.get("summary")
+    request.session.modified = True
 
     return JsonResponse(data, safe=False)
-
 
 # ---------------------------------------------------------------------
 # Simple smoke routes
@@ -230,6 +228,33 @@ def _spotify_token_exchange(code: str):
     r = requests.post("https://accounts.spotify.com/api/token", data=data, timeout=20)
     r.raise_for_status()
     return r.json()
+
+def _collect_matched_ids(payload) -> list[str]:
+    """
+    Extract Spotify track IDs from your matcher output:
+      {"summary": {...}, "results": [ { "status": "...", "spotify_id": "..." }, ... ]}
+    Keeps only rows with status matched/fuzzy_matched. Dedupe, preserve order.
+    """
+    ids = []
+    iterable = []
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        iterable = payload["results"]
+    elif isinstance(payload, list):
+        iterable = payload
+
+    for row in iterable:
+        if not isinstance(row, dict):
+            continue
+        if row.get("status") in ("matched", "fuzzy_matched"):
+            tid = row.get("spotify_id") or row.get("id") or row.get("track_id")
+            if isinstance(tid, str) and len(tid) == 22:  # Spotify base62 track id
+                ids.append(tid)
+
+    seen, out = set(), []
+    for t in ids:
+        if t not in seen:
+            seen.add(t); out.append(t)
+    return out
 
 def _now_ts(): return int(time.time())
 _EXP_BUFFER = 60  # refresh 1 min early
