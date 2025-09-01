@@ -4,7 +4,6 @@
   <meta charset="utf-8" />
   <title>Matching…</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <!-- Prevent dark-mode inversion + caching -->
   <meta name="color-scheme" content="light only">
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
@@ -12,7 +11,7 @@
     html, body { background:#fff; color:#111; }
     body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; }
     .bar-wrap { width:100%; max-width:640px; height:16px; background:#eee; border-radius:999px; overflow:hidden; border:1px solid #ddd; }
-    .bar { height:100%; width:0%; background:#0a7a0a; transition: width .25s ease; }
+    .bar { height:100%; width:0%; background:#0a7a0a; transition: width .18s ease; }
     .row { display:flex; align-items:center; gap:1rem; margin-top:.75rem; }
     .muted { color:#666; }
     .error { color:#b00020; margin-top: 1rem; }
@@ -45,7 +44,11 @@
       const counts = document.getElementById('counts');
       const err = document.getElementById('err');
 
+      // Local notion of "done" so we can animate per-song
+      let localDone = 0;
       const BATCH_SIZE = 10;
+      const MAX_POLLS = 2000;  // safety
+      let polls = 0;
 
       function paint(done, total) {
         const t = total || totalCount || 1;
@@ -55,7 +58,18 @@
         counts.textContent = `${done} / ${t}`;
       }
 
+      function animateSongs(n, total, after) {
+        if (n <= 0) { after(); return; }
+        localDone += 1;
+        paint(localDone, total);
+        // small delay per song for smoothness
+        setTimeout(() => animateSongs(n - 1, total, after), 90);
+      }
+
       async function step() {
+        if (++polls > MAX_POLLS) {
+          throw new Error('Too many polling attempts — aborting.');
+        }
         const url = `/match/run/${encodeURIComponent(jobId)}?batch=${BATCH_SIZE}`;
         const resp = await fetch(url, {
           method: 'POST',
@@ -69,18 +83,28 @@
         }
 
         const data = await resp.json();
-        const done = Number(data.done || 0);
+        const serverDone = Number(data.done || 0);
+        const processed = Number(data.processed || 0);
+
+        // Server's total is authoritative once seen
         if ((data.total || 0) > 0) totalCount = Number(data.total);
         const total = totalCount > 0 ? totalCount : (Number(data.total || 0) || 1);
 
-        paint(done, total);
-
-        // ✅ Only leave when server says done AND we actually finished all items
-        if (data.status === 'done' && total > 0 && done >= total) {
-          window.location.href = `/match/results/${encodeURIComponent(jobId)}?created=0`;
-          return;
+        // Ensure localDone catches up if needed (e.g., first response)
+        if (localDone < serverDone - processed) {
+          localDone = serverDone - processed;
+          paint(localDone, total);
         }
-        setTimeout(step, 150);
+
+        // Animate one tick per processed song, then continue polling
+        animateSongs(processed, total, () => {
+          if (data.status === 'done' && total > 0 && serverDone >= total) {
+            window.location.href = `/match/results/${encodeURIComponent(jobId)}?created=0`;
+            return;
+          }
+          // Slight pause so the browser paints between polls
+          setTimeout(step, 120);
+        });
       }
 
       if (!jobId) {
@@ -88,6 +112,9 @@
         err.style.display = 'block';
         return;
       }
+
+      // Initialize display
+      paint(0, totalCount);
 
       step().catch((e) => {
         console.error(e);

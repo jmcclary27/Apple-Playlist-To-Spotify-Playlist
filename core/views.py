@@ -176,51 +176,84 @@ def _jobs_col():
 
 @require_POST
 def match_run(request, job_id: str):
-    """
-    Process the next N tracks of a job and update progress.
-    The client calls this repeatedly until status == 'done'.
-    """
-    job = _jobs_col().find_one({"_id": job_id})
+    col = _jobs_col()
+    job = col.find_one({"_id": job_id})
     if not job:
         return JsonResponse({"error": "Job not found"}, status=404)
+
+    apple_tracks = job.get("apple_tracks") or []
+    total = int(job.get("total") or len(apple_tracks))
+    done = int(job.get("done") or 0)
+    done = max(0, min(done, total))
+
+    # Empty/invalid job: don't spin forever
+    if total <= 0 or not apple_tracks:
+        return JsonResponse({"error": "Job has no tracks. Please re-upload."}, status=400)
+
+    # Already complete?
+    if done >= total:
+        # Ensure DB status says done
+        if job.get("status") != "done":
+            col.update_one(
+                {"_id": job_id},
+                {"$set": {"status": "done",
+                          "finished_at": datetime.datetime.utcnow(),
+                          "updated_at": datetime.datetime.utcnow()}}
+            )
+        return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
+
+    # Batch size
+    try:
+        batch = int(request.GET.get("batch", "10"))
+    except Exception:
+        batch = 10
+    batch = max(1, min(batch, 100))
+
+    remaining = total - done
+    take = min(batch, remaining)
+    start = done
+    stop = start + take
+    slice_tracks = apple_tracks[start:stop]
+
+    # Safety: if slice is empty but not done, mark done to avoid loops.
+    if not slice_tracks:
+        col.update_one(
+            {"_id": job_id},
+            {"$set": {"status": "done",
+                      "done": total,
+                      "finished_at": datetime.datetime.utcnow(),
+                      "updated_at": datetime.datetime.utcnow()}}
+        )
+        return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
+
+    # Run matching on this slice
     access_token = _get_any_spotify_token(request)
     if not access_token:
         return JsonResponse({"error": "Spotify credentials missing"}, status=400)
 
-    apple_tracks = job.get("apple_tracks") or []
-    total = job.get("total") or len(apple_tracks)
-    done = int(job.get("done") or 0)
-    if done >= total:
-        return JsonResponse({"done": done, "total": total, "status": "done"})
-
-    batch = max(1, min( int(request.GET.get("batch") or 10), 100 ))
-    slice_tracks = apple_tracks[done:done+batch]
-    if not slice_tracks:
-        _jobs_col().update_one({"_id": job_id}, {"$set": {"status": "done", "finished_at": datetime.datetime.utcnow()}})
-        return JsonResponse({"done": done, "total": total, "status": "done"})
-
-    # Run matcher on this slice
     data = match_tracks(access_token, slice_tracks, fuzzy_threshold=85)
     results = data["results"] if isinstance(data, dict) and isinstance(data.get("results"), list) else (data or [])
 
-    # Count statuses
+    # Tally this batch
     matched_ct = sum(1 for r in results if r.get("status") == "matched")
     fuzzy_ct   = sum(1 for r in results if r.get("status") == "fuzzy_matched")
     not_ct     = sum(1 for r in results if r.get("status") == "not_found")
 
-    # Extract IDs to add later
     ids_this = []
     for r in results:
         tid = r.get("spotify_id")
         if isinstance(tid, str) and len(tid) == 22:
             ids_this.append(tid)
 
-    # Update job doc
-    _jobs_col().update_one(
+    processed = len(slice_tracks)
+    new_done = min(total, done + processed)
+
+    # Update job
+    col.update_one(
         {"_id": job_id},
         {
             "$inc": {
-                "done": len(slice_tracks),
+                "done": processed,
                 "summary.matched": matched_ct,
                 "summary.fuzzy_matched": fuzzy_ct,
                 "summary.not_found": not_ct,
@@ -231,11 +264,21 @@ def match_run(request, job_id: str):
         }
     )
 
-    done += len(slice_tracks)
-    if done >= total:
-        _jobs_col().update_one({"_id": job_id}, {"$set": {"status": "done", "finished_at": datetime.datetime.utcnow()}})
+    status = "done" if new_done >= total else "running"
+    if status == "done":
+        col.update_one(
+            {"_id": job_id},
+            {"$set": {"status": "done",
+                      "finished_at": datetime.datetime.utcnow(),
+                      "updated_at": datetime.datetime.utcnow()}}
+        )
 
-    return JsonResponse({"done": done, "total": total, "status": "done" if done >= total else "running"})
+    return JsonResponse({
+        "done": new_done,
+        "total": total,
+        "status": status,
+        "processed": processed,      # <-- for per-song animation
+    })
 
 # ---------------------------------------------------------------------
 # Matching job flow
