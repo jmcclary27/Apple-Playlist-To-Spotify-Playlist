@@ -557,16 +557,23 @@ def normalize_album(album: str) -> str:
     return a
 
 # --- helper: combine title/artist/album normalization in one place ---
-def normalized_triplet_from_track(track):
-    raw_title  = _get(track, "Norm Title", "NormTitle", "Title", "title") or ""
-    raw_artist = _get(track, "Norm Artist", "NormArtist", "Artist", "artist") or ""
-    raw_album  = _get(track, "Album", "album") or _get(track, "Collection", "collection") or ""
+def normalized_triplet_from_track(track: Dict[str, Any]) -> tuple[str, str, str]:
+    """
+    Returns (nt, na, nb) = normalized title, artist, album.
+    Prefers your precomputed columns 'Norm Title' and 'Norm Artist' if present/non-empty.
+    Falls back to normalize_* helpers otherwise.
+    """
+    # prefer your precomputed columns if they exist and are non-empty
+    nt_pre = _get(track, "Norm Title", "norm_title", default=None)
+    na_pre = _get(track, "Norm Artist", "norm_artist", default=None)
 
-    nt = normalize_title(raw_title)
-    na = normalize_artist(raw_artist)
-    nb = normalize_album(raw_album)  # <-- don’t forget this
+    title_raw  = _get(track, "Title", "title")
+    artist_raw = _get(track, "Artist", "artist")
+    album_raw  = _get(track, "Album", "album")
 
-    return nt, na, nb
+    nt = nt_pre.strip().lower() if isinstance(nt_pre, str) and nt_pre.strip() else normalize_title(title_raw)
+    na = na_pre.strip().lower() if isinstance(na_pre, str) and na_pre.strip() else normalize_artist(artist_raw)
+    nb = normalize_album(album_raw)
 
 # ---------- Batch runner with throttling and caching ----------
 
