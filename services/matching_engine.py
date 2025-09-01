@@ -43,29 +43,23 @@ def normalize_artist(artist: str) -> str:
 
 import re, unicodedata
 
-def normalize_album(s: str) -> str:
-    s = (s or "").lower()
-    s = unicodedata.normalize("NFKD", s)
-    s = s.replace("’", "'").replace("&", " and ")
-    # turn dotted acronyms into spaced letters: m.a.a.d -> m a a d
-    s = re.sub(r"[.\u00B7]", " ", s)
-    # remove (feat/with ...) segments if present in album field
-    s = re.sub(r"\s*[\(\[\{]?(feat\.?|with)\s+[^)\]\}]+[\)\]\}]?", "", s)
-    # remove packaging/edition tags in parentheses/brackets
-    s = re.sub(
-        r"\s*[\(\[\{]\s*(deluxe|expanded|bonus|remaster(ed)?(\s+\d{2,4})?|"
+ALBUM_STRIP_RE = re.compile(
+    (
+        r"\s*[([{]\s*(?:"
+        r"deluxe|expanded|bonus|remaster(?:ed)?(?:\s+\d{2,4})?|"
         r"anniversary|edition|single|explicit|clean|commentary|instrumental|"
-        r"live|demo|reissue|super\s*deluxe|special\s*edition)[^)\]\}]*[\)\]\}]",
-        "",
-        s,
-    )
-    # strip non-alnum, collapse spaces
-    s = re.sub(r"[^a-z0-9'\s]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
+        r"live|demo|reissue|super\s*deluxe|special\s*edition"
+        r")[^)\]}]*[)\]}]"
+    ),
+    flags=re.IGNORECASE,
+)
 
-    # if what's left is too generic, don’t use album matching
-    if s in {"", "single", "ep", "album", "deluxe", "expanded", "bonus", "remaster", "remastered"}:
+def normalize_album(s: str) -> str:
+    if not s:
         return ""
+    s = unicodedata.normalize("NFKC", s)
+    s = ALBUM_STRIP_RE.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
 def canonical_key(title: str, artist: str) -> str:
