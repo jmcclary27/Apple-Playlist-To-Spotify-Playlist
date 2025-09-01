@@ -272,7 +272,7 @@ def match_one_track(
     # --- raw fields (preserve punctuation for search strength) ---
     title  = _get(track, "Title", "title")
     artist = _get(track, "Artist", "artist")
-    album  = _get(track, "Album", "album")
+    album  = _get(track, "Album", "album", "Album Name", "album_name", "Raw Album", "raw_album")
     isrc   = (_get(track, "ISRC", "isrc") or "").strip()
     dur_ms = track.get("duration_ms")
 
@@ -570,7 +570,7 @@ def normalized_triplet_from_track(track: Dict[str, Any]) -> tuple[str, str, str]
 
     title_raw  = _get(track, "Title", "title")
     artist_raw = _get(track, "Artist", "artist")
-    album_raw  = _get(track, "Album", "album")
+    album_raw  = _get(track, "Album", "album", "Album Name", "album_name", "Raw Album", "raw_album")
 
     nt = nt_pre.strip().lower() if isinstance(nt_pre, str) and nt_pre.strip() else normalize_title(title_raw)
     na = na_pre.strip().lower() if isinstance(na_pre, str) and na_pre.strip() else normalize_artist(artist_raw)
