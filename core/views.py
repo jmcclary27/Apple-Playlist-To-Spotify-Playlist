@@ -1,5 +1,8 @@
 # core/views.py
-import os, io, urllib.parse, base64, datetime, math, json, re, time, uuid
+import os, urllib.parse, datetime, json, re, time, uuid
+from threading import Thread
+from uuid import uuid4
+
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import render, redirect
 from django.views.decorators.csrf import ensure_csrf_cookie
@@ -10,7 +13,6 @@ import requests
 from services.matching_engine import match_tracks
 from .forms import LinkForm
 from .parsers import parse_apple_playlist_from_url
-from pymongo import ReturnDocument
 from bson.objectid import ObjectId
 
 # ---------------------------------------------------------------------
@@ -28,11 +30,13 @@ def debug_status(request):
         "app_token_expires_in": (request.session.get("spotify_app_expires_at") or 0) - int(time.time()),
         "allowed_hosts": settings.ALLOWED_HOSTS,
         "csrf_trusted_origins": getattr(settings, "CSRF_TRUSTED_ORIGINS", []),
-        # NEW
-        "matched_spotify_ids_count": len(request.session.get("matched_spotify_ids") or []),
-        "matched_scope": request.session.get("matched_scope"),
-        "matched_summary": request.session.get("matched_summary"),
     })
+
+# ---------------------------------------------------------------------
+# Landing
+# ---------------------------------------------------------------------
+def landing(request):
+    return render(request, "landing.html")
 
 # ---------------------------------------------------------------------
 # Spotify token helpers
@@ -71,7 +75,6 @@ def _get_app_token(request):
         timeout=15,
     )
     if not resp.ok:
-        # Optional: log resp.text for troubleshooting
         return None
 
     data = resp.json()
@@ -87,7 +90,7 @@ def _get_app_token(request):
 
 def _get_any_spotify_token(request):
     """
-    Unified getter used by match_view:
+    Unified getter used by matching:
     - Prefer a valid user token from session (if you saved one).
     - Else fall back to app token (client credentials).
     Returns token string or None.
@@ -95,13 +98,72 @@ def _get_any_spotify_token(request):
     return _get_user_token_from_session(request) or _get_app_token(request)
 
 # ---------------------------------------------------------------------
-# Match endpoint (POST only)
+# DB helpers
 # ---------------------------------------------------------------------
-def _collect_matched_ids_schema_aware(payload) -> list[str]:
+def _db():
+    from .mongo import get_db
+    return get_db()
+
+def _jobs_col():
+    return _db().jobs
+
+def _conversions_col():
+    return _db().conversions
+
+def _unmatched_col():
+    return _db().unmatched
+
+def _tokens_col():
+    return _db().spotify_tokens
+
+# ---------------------------------------------------------------------
+# Upload page
+# ---------------------------------------------------------------------
+@ensure_csrf_cookie
+def upload_link(request):
+    if request.method == 'POST':
+        form = LinkForm(request.POST)
+        if not form.is_valid():
+            return HttpResponseBadRequest("Invalid URL.")
+
+        url = form.cleaned_data['url']
+        try:
+            rows = parse_apple_playlist_from_url(url)  # list[dict]
+        except Exception as e:
+            return HttpResponseBadRequest(f"Error: {e}")
+
+        # Save in session for matching job
+        request.session["apple_tracks_all"] = rows
+        request.session["show_match_buttons"] = True
+        request.session["track_count"] = len(rows)
+        # Friendly name (fallback if we can’t parse better)
+        request.session["playlist_name"] = url or "Imported from Apple Music"
+        request.session.modified = True
+
+        return redirect("upload")
+
+    # GET
+    uploaded_ok = request.session.pop("show_match_buttons", False)
+    track_count = request.session.pop("track_count", 0)
+    preview = (request.session.get("apple_tracks_all") or [])[:10]
+
+    return render(request, 'upload.html', {
+        'form': LinkForm(),
+        'preview': preview,
+        'count_total': len(request.session.get("apple_tracks_all") or []),
+        'filename': request.session.get('playlist_name', ''),
+        'uploaded_ok': uploaded_ok,
+        'track_count': track_count,
+    })
+
+# ---------------------------------------------------------------------
+# Matching job flow
+# ---------------------------------------------------------------------
+def _collect_ids_from_results(payload) -> list[str]:
     """
-    Fallback collector tailored to your matcher shape:
+    Extract Spotify track IDs from matcher output:
       {"summary": {...}, "results": [ { "status": "...", "spotify_id": "..." }, ... ]}
-    Keeps only matched/fuzzy_matched. Dedupe and preserve order.
+    Keep only matched/fuzzy_matched; dedupe, preserve order.
     """
     ids = []
     if isinstance(payload, dict) and isinstance(payload.get("results"), list):
@@ -117,123 +179,116 @@ def _collect_matched_ids_schema_aware(payload) -> list[str]:
     return ids
 
 @require_POST
-def match_view(request):
-    access_token = _get_any_spotify_token(request)
-    if not access_token:
-        return HttpResponseBadRequest(
-            "Spotify credentials missing: no valid user token found and app token not available. "
-            "Set SPOTIFY_CLIENT_ID/SECRET on Render or complete Spotify login."
-        )
-
-    scope = (request.GET.get("scope") or "sample").lower()
-    if scope == "all":
-        apple_tracks = request.session.get("apple_tracks_all") or []
-    else:
-        apple_tracks = request.session.get("apple_tracks_sample") or []
-
-    # Optional override via JSON body: {"tracks": [...]}
-    if not apple_tracks and request.body:
-        try:
-            payload = json.loads(request.body.decode("utf-8"))
-            if isinstance(payload, dict) and isinstance(payload.get("tracks"), list):
-                apple_tracks = payload["tracks"]
-        except Exception:
-            pass
-
+def match_start(request):
+    """Start a background matching job, return job_id."""
+    apple_tracks = request.session.get("apple_tracks_all") or []
     if not apple_tracks:
-        return HttpResponseBadRequest("No tracks found. Upload first, or POST a JSON body with {'tracks': [...]}.")
+        return JsonResponse({"error": "No tracks found in session. Go back to Upload."}, status=400)
 
-    # Run matcher
-    data = match_tracks(access_token, apple_tracks, fuzzy_threshold=85)
+    source_name = request.session.get("playlist_name") or "Imported from Apple Music"
 
-    # ---- persist matched Spotify IDs in the session ----
-    ids: list[str] = []
-    # Primary: your generic extractor (handles URIs/URLs/strings)
-    try:
-        ids = _extract_spotify_ids_from_match_result(data) or []
-    except Exception:
-        ids = []
+    token = _get_any_spotify_token(request)
+    if not token:
+        return JsonResponse({"error": "Spotify app credential missing (client id/secret)."}, status=500)
 
-    # Fallback: schema-aware (uses "results" with status + spotify_id)
-    if not ids:
-        ids = _collect_matched_ids_schema_aware(data)
-
-    # Dedupe again (just in case) while preserving order
-    seen = set(); ordered_ids = []
-    for tid in ids:
-        if isinstance(tid, str) and len(tid) == 22 and tid not in seen:
-            seen.add(tid); ordered_ids.append(tid)
-
-    # Save & force write
-    request.session["matched_spotify_ids"] = ordered_ids
-    request.session["matched_scope"] = scope
-    if isinstance(data, dict):
-        request.session["matched_summary"] = data.get("summary")
-    request.session.modified = True
-    request.session.save()   # <— ensure it’s persisted for the next request
-    # ----------------------------------------------------
-
-    # (Optional: include a tiny hint back to the UI)
-    return JsonResponse({
-        **(data if isinstance(data, dict) else {"results": data}),
-        "_saved_matched_ids": len(ordered_ids),
-        "_matched_scope": scope,
-    }, safe=False)
-
-# ---------------------------------------------------------------------
-# Simple smoke routes
-# ---------------------------------------------------------------------
-def index(request):
-    return HttpResponse("It works! 🎉")
-
-def health(request):
-    return HttpResponse("ok")
-
-def _tokens_col():
-    from .mongo import get_db
-    return get_db().spotify_tokens
-
-# ---------------------------------------------------------------------
-# Upload via URL (your existing flow, now saves session flags for buttons)
-# ---------------------------------------------------------------------
-@ensure_csrf_cookie
-def upload_link(request):
-    if request.method == 'POST':
-        form = LinkForm(request.POST)
-        if not form.is_valid():
-            return HttpResponseBadRequest("Invalid URL.")
-
-        url = form.cleaned_data['url']
-        try:
-            rows = parse_apple_playlist_from_url(url)  # list[dict] with Title/Artist/Album/ISRC/...
-        except Exception as e:
-            return HttpResponseBadRequest(f"Error: {e}")
-
-        request.session["apple_tracks_all"] = rows
-        request.session["apple_tracks_sample"] = rows[:50]
-        request.session["show_match_buttons"] = True
-        request.session["track_count"] = len(rows)
-        request.session["last_source"] = "link"
-        request.session.modified = True
-
-        return redirect("upload")  # root route named 'upload'
-
-    # GET: render page, preview, and (if flags set) show match buttons
-    uploaded_ok = request.session.pop("show_match_buttons", False)
-    track_count = request.session.pop("track_count", 0)
-    preview = (request.session.get("apple_tracks_all") or [])[:10]
-
-    return render(request, 'upload.html', {
-        'form': LinkForm(),
-        'preview': preview,
-        'count_total': len(request.session.get("apple_tracks_all") or []),
-        'filename': request.GET.get('url', ''),
-        'uploaded_ok': uploaded_ok,
-        'track_count': track_count,
+    job_id = uuid4().hex
+    now = datetime.datetime.utcnow()
+    _jobs_col().insert_one({
+        "_id": job_id,
+        "status": "queued",
+        "progress": 0,
+        "created_at": now,
+        "updated_at": now,
+        "source_name": source_name,
+        "apple_count": len(apple_tracks),
+        "summary": None,
+        "results": None,
+        "matched_ids": [],
+        "error": None,
     })
 
+    Thread(target=_run_match_job, args=(job_id, token, apple_tracks), daemon=True).start()
+    return JsonResponse({"job_id": job_id})
+
+def _run_match_job(job_id: str, access_token: str, apple_tracks: list[dict]):
+    col = _jobs_col()
+    def set_state(**kv):
+        kv["updated_at"] = datetime.datetime.utcnow()
+        col.update_one({"_id": job_id}, {"$set": kv})
+
+    try:
+        set_state(status="running", progress=10)
+        data = match_tracks(access_token, apple_tracks, fuzzy_threshold=85)
+        ids = _collect_ids_from_results(data)
+        summary = data.get("summary") if isinstance(data, dict) else None
+        results = data.get("results") if isinstance(data, dict) else data
+        set_state(progress=90)
+        set_state(status="done", progress=100, results=results, summary=summary, matched_ids=ids)
+    except Exception as e:
+        set_state(status="error", error=str(e), progress=100)
+
+@require_GET
+def match_progress_page(request, job_id: str):
+    job = _jobs_col().find_one({"_id": job_id})
+    if not job:
+        return HttpResponse("Job not found", status=404)
+    return render(request, "match_progress.html", {"job_id": job_id})
+
+@require_GET
+def match_status(request, job_id: str):
+    job = _jobs_col().find_one({"_id": job_id}, {"_id": 0})
+    if not job:
+        return JsonResponse({"status": "missing"}, status=404)
+    return JsonResponse({
+        "status": job.get("status"),
+        "progress": int(job.get("progress") or 0),
+        "error": job.get("error"),
+    })
+
+@require_GET
+def match_results_page(request, job_id: str):
+    job = _jobs_col().find_one({"_id": job_id})
+    if not job:
+        return HttpResponse("Job not found.", status=404)
+    results = job.get("results") or []
+    created = request.GET.get("created") == "1"
+    playlist_url = request.GET.get("playlist_url") or ""
+    summary = job.get("summary") or {
+        "matched": sum(1 for r in results if r.get("status") in ("matched", "fuzzy_matched")),
+        "fuzzy_matched": sum(1 for r in results if r.get("status") == "fuzzy_matched"),
+        "not_found": sum(1 for r in results if r.get("status") == "not_found"),
+        "total": len(results),
+    }
+    return render(request, "match_results.html", {
+        "request": request,
+        "job_id": job_id,
+        "results": results[:1000],  # cap display
+        "summary": summary,
+        "created": created,
+        "playlist_url": playlist_url,
+    })
+
+@require_GET
+def match_report_csv(request, job_id: str):
+    job = _jobs_col().find_one({"_id": job_id})
+    if not job:
+        return HttpResponse("Job not found.", status=404)
+    import csv
+    from django.utils.encoding import smart_str
+    resp = HttpResponse(content_type="text/csv")
+    resp["Content-Disposition"] = f'attachment; filename="match_report_{job_id}.csv"'
+    w = csv.writer(resp)
+    w.writerow(["status","score","raw_title","raw_artist","raw_album","spotify_id","method"])
+    for r in (job.get("results") or []):
+        w.writerow([
+            r.get("status"), r.get("score"),
+            smart_str(r.get("raw_title","")), smart_str(r.get("raw_artist","")), smart_str(r.get("raw_album","")),
+            r.get("spotify_id"), r.get("method"),
+        ])
+    return resp
+
 # ---------------------------------------------------------------------
-# OAuth + playlist creation helpers (your existing code; unchanged)
+# OAuth + playlist creation (via callback)
 # ---------------------------------------------------------------------
 def _json_error(message: str, status=400):
     return JsonResponse({"error": message}, status=status)
@@ -241,6 +296,12 @@ def _json_error(message: str, status=400):
 def spotify_login(request):
     state = uuid.uuid4().hex
     request.session["spotify_oauth_state"] = state
+
+    # Pass-through info for callback
+    job_id = request.GET.get("job_id")
+    next_url = request.GET.get("next") or "/"
+    request.session["oauth_ctx"] = {"job_id": job_id, "next": next_url}
+    request.session.modified = True
 
     client_id = os.environ.get("SPOTIFY_CLIENT_ID")
     redirect_uri = os.environ.get("SPOTIFY_REDIRECT_URI")
@@ -276,38 +337,10 @@ def _spotify_token_exchange(code: str):
     r.raise_for_status()
     return r.json()
 
-def _collect_matched_ids(payload) -> list[str]:
-    """
-    Extract Spotify track IDs from your matcher output:
-      {"summary": {...}, "results": [ { "status": "...", "spotify_id": "..." }, ... ]}
-    Keeps only rows with status matched/fuzzy_matched. Dedupe, preserve order.
-    """
-    ids = []
-    iterable = []
-    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
-        iterable = payload["results"]
-    elif isinstance(payload, list):
-        iterable = payload
-
-    for row in iterable:
-        if not isinstance(row, dict):
-            continue
-        if row.get("status") in ("matched", "fuzzy_matched"):
-            tid = row.get("spotify_id") or row.get("id") or row.get("track_id")
-            if isinstance(tid, str) and len(tid) == 22:  # Spotify base62 track id
-                ids.append(tid)
-
-    seen, out = set(), []
-    for t in ids:
-        if t not in seen:
-            seen.add(t); out.append(t)
-    return out
-
 def _now_ts(): return int(time.time())
 _EXP_BUFFER = 60  # refresh 1 min early
 
 def _save_tokens(spotify_user_id: str, access_token: str, refresh_token: str | None, expires_in: int):
-    from .mongo import get_db
     expires_at = _now_ts() + int(expires_in) - _EXP_BUFFER
     update = {"$set": {
         "spotify_user_id": spotify_user_id,
@@ -317,11 +350,10 @@ def _save_tokens(spotify_user_id: str, access_token: str, refresh_token: str | N
     }}
     if refresh_token:
         update["$set"]["refresh_token"] = refresh_token
-    get_db().spotify_tokens.update_one({"spotify_user_id": spotify_user_id}, update, upsert=True)
+    _tokens_col().update_one({"spotify_user_id": spotify_user_id}, update, upsert=True)
 
 def _get_tokens(spotify_user_id: str):
-    from .mongo import get_db
-    return get_db().spotify_tokens.find_one({"spotify_user_id": spotify_user_id})
+    return _tokens_col().find_one({"spotify_user_id": spotify_user_id})
 
 def _is_expired(doc: dict | None) -> bool:
     if not doc: return True
@@ -364,120 +396,13 @@ def _spotify_api(spotify_user_id: str, method: str, path: str, **kwargs):
     r.raise_for_status()
     return r.json() if r.content else {}
 
-# --- Helpers to extract Spotify IDs from arbitrary match output ---
-
-_SPOTIFY_ID_RE = re.compile(r'\b[0-9A-Za-z]{22}\b')  # typical base62 track id
-
-# --- Robust extractor: finds IDs in dicts, lists, URIs, and URLs ---
-_SPOTIFY_ID_RE = re.compile(r'\b[0-9A-Za-z]{22}\b')  # base62 track id (22 chars)
-
-def _iter_scalars(obj):
-    """Yield every scalar value (including strings in lists), and dict keys too."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield ("key", k)
-            yield from _iter_scalars(v)
-    elif isinstance(obj, list):
-        for v in obj:
-            yield from _iter_scalars(v)
-    else:
-        yield ("value", obj)
-
-def _extract_spotify_ids_from_match_result(match_result) -> list[str]:
-    """
-    Pull 22-char Spotify track IDs out of ANY nested structure:
-    - dicts with keys like spotify_id/id/track_id/...
-    - lists of strings (IDs, URIs, URLs)
-    - strings containing URIs (spotify:track:ID) or URLs (…/track/ID)
-    """
-    ids: list[str] = []
-    candidate_keys = {"spotify_id", "id", "track_id", "trackId", "spotify_track_id", "spotifyId", "spotify_uri", "uri"}
-
-    def add(raw: str | None):
-        if not isinstance(raw, str): return
-        # If it's a full URI/URL, extract the 22-char token; else try direct match
-        m = _SPOTIFY_ID_RE.search(raw)
-        if m:
-            tok = m.group(0)
-            ids.append(tok)
-
-    for kind, val in _iter_scalars(match_result):
-        if kind == "key" and isinstance(val, str):
-            # we only use keys to bias, real extraction happens on values below
-            continue
-        # Values: if it’s a dict value under a “candidate” key, or any string at all
-        if isinstance(val, str):
-            add(val)
-        elif isinstance(val, dict):
-            # If a dict contains a candidate key with a string, add it
-            for k2 in candidate_keys:
-                v2 = val.get(k2)
-                if isinstance(v2, str):
-                    add(v2)
-
-    # Dedup while preserving order
-    seen, out = set(), []
-    for tid in ids:
-        if tid not in seen:
-            seen.add(tid)
-            out.append(tid)
-    return out
-
-
 def _spotify_me(access_token: str):
     r = requests.get("https://api.spotify.com/v1/me",
                      headers={"Authorization": f"Bearer {access_token}"}, timeout=20)
     r.raise_for_status()
     return r.json()
 
-def _duration_close(a: int|None, b: int|None, tolerance=4) -> bool:
-    if a is None or b is None: return True
-    return abs(a - b) <= tolerance
-
-def _search_best(access_token: str, item: dict) -> str|None:
-    qs = []
-    title = item.get("title") or ""
-    artist = item.get("artist") or ""
-    album = item.get("album") or ""
-    dur = item.get("duration_sec")
-
-    qs.append(f'track:"{title}" artist:"{artist}" album:"{album}"')
-    qs.append(f'track:"{title}" artist:"{artist}"')
-    qs.append(f'{title} {artist}')
-
-    for q in qs:
-        r = requests.get("https://api.spotify.com/v1/search",
-                         headers={"Authorization": f"Bearer {access_token}"},
-                         params={"q": q, "type": "track", "limit": 5}, timeout=20)
-        if r.status_code == 429:
-            time.sleep(int(r.headers.get("Retry-After","1")))
-            continue
-        r.raise_for_status()
-        items = r.json().get("tracks", {}).get("items", [])
-        best = None
-        for t in items:
-            t_dur = int(round(t.get("duration_ms", 0)/1000))
-            if not _duration_close(dur, t_dur):
-                continue
-            best = t
-            break
-        if best:
-            return best["id"]
-    return None
-
-def _add_tracks(access_token: str, playlist_id: str, uris: list[str]):
-    for i in range(0, len(uris), 100):
-        chunk = uris[i:i+100]
-        r = requests.post(f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks",
-                          headers={"Authorization": f"Bearer {access_token}",
-                                   "Content-Type": "application/json"},
-                          json={"uris": [f"spotify:track:{tid}" for tid in chunk]},
-                          timeout=20)
-        r.raise_for_status()
-
 def spotify_callback(request):
-    from .mongo import get_db
-    db = get_db()
     if "error" in request.GET:
         return HttpResponse(f"Spotify returned error: {request.GET.get('error')}", status=400)
 
@@ -493,178 +418,70 @@ def spotify_callback(request):
     request.session["spotify_user_id"] = user_id
     _save_tokens(user_id, at, tok.get("refresh_token"), tok["expires_in"])
 
-    items = request.session.get("parsed_items") or []
-    name = request.session.get("playlist_name") or "Imported from Apple Music"
-    if not items:
-        return redirect("/me")
+    # Use job context to build playlist and return to results page
+    ctx = request.session.pop("oauth_ctx", {}) or {}
+    job_id = ctx.get("job_id")
+    next_url = ctx.get("next") or "/"
 
-    _save_tokens(user_id, at, tok.get("refresh_token"), tok["expires_in"])
+    if job_id:
+        job = _jobs_col().find_one({"_id": job_id})
+        if not job:
+            return redirect(next_url)
 
-    r = requests.post(
-        f"https://api.spotify.com/v1/users/{user_id}/playlists",
-        headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
-        json={"name": name, "public": False, "description": "Imported from Apple Music"},
-        timeout=20,
-    )
-    r.raise_for_status()
-    playlist = r.json()
-    playlist_id = playlist["id"]
-    playlist_url = playlist.get("external_urls", {}).get("spotify", "")
+        matched_ids = job.get("matched_ids") or _collect_ids_from_results({"results": job.get("results") or []})
+        name = job.get("source_name") or "Imported from Apple Music"
 
-    matched_ids, misses = [], []
-    for idx, it in enumerate(items):
-        tid = _search_best(at, it)
-        if tid:
-            matched_ids.append(tid)
-        else:
-            misses.append({"idx": idx, **it})
-
-    if matched_ids:
-        _add_tracks(at, playlist_id, matched_ids)
-
-    conv_doc = {
-        "created_at": datetime.datetime.utcnow(),
-        "spotify_user_id": user_id,
-        "playlist_name": name,
-        "spotify_playlist_id": playlist_id,
-        "spotify_playlist_url": playlist_url,
-        "total": len(items),
-        "matched": len(matched_ids),
-        "unmatched": len(misses),
-    }
-    cid = db.conversions.insert_one(conv_doc).inserted_id
-    if misses:
-        for m in misses:
-            m["conversion_id"] = cid
-        db.unmatched.insert_many(misses)
-
-    request.session.pop("parsed_items", None)
-    request.session.pop("playlist_name", None)
-    return redirect("conversion_detail", cid=str(cid))
-
-@require_POST
-def create_spotify_playlist(request):
-    spotify_user_id = request.session.get("spotify_user_id")
-    if not spotify_user_id:
-        return _json_error("Not logged into Spotify", status=401)
-
-    try:
-        payload = json.loads(request.body or "{}")
-    except json.JSONDecodeError:
-        payload = {}
-
-    source_name = payload.get("source_name") or "Imported from Apple Music"
-    make_public = bool(payload.get("public", False))
-
-    ids = payload.get("track_ids_in_order") or request.session.get("matched_spotify_ids") or []
-    if not ids:
-        return _json_error("No matched Spotify track IDs found. Run a match first.", status=400)
-
-    # Dedupe while preserving order
-    seen = set()
-    ordered_ids = []
-    for tid in ids:
-        if tid and tid not in seen:
-            seen.add(tid)
-            ordered_ids.append(tid)
-
-    # Valid access token (refresh if needed)
-    at = _get_valid_access_token(spotify_user_id)
-
-    # 1) Create the playlist
-    create_resp = requests.post(
-        f"https://api.spotify.com/v1/users/{spotify_user_id}/playlists",
-        headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
-        json={
-            "name": source_name,
-            "description": "Imported via Apple→Spotify by am2spot",
-            "public": make_public,
-            "collaborative": False
-        },
-        timeout=20,
-    )
-    if create_resp.status_code == 401:
-        # refresh and retry once
-        at = _refresh_access_token(spotify_user_id)
-        create_resp = requests.post(
-            f"https://api.spotify.com/v1/users/{spotify_user_id}/playlists",
+        # 1) Create playlist (private by default)
+        r = requests.post(
+            f"https://api.spotify.com/v1/users/{user_id}/playlists",
             headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
-            json={
-                "name": source_name,
-                "description": "Imported via Apple→Spotify by am2spot",
-                "public": make_public,
-                "collaborative": False
-            },
+            json={"name": name, "public": False, "description": "Imported via Apple→Spotify"},
             timeout=20,
         )
-    create_resp.raise_for_status()
-    playlist = create_resp.json()
-    playlist_id = playlist["id"]
-    playlist_url = playlist.get("external_urls", {}).get("spotify", "")
-
-    # 2) Add tracks in chunks of 100
-    total_added = 0
-    add_url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
-    headers = {"Authorization": f"Bearer {at}", "Content-Type": "application/json"}
-
-    for i in range(0, len(ordered_ids), 100):
-        chunk = ordered_ids[i:i+100]
-        uris = [f"spotify:track:{tid}" for tid in chunk]
-        r = requests.post(add_url, headers=headers, json={"uris": uris}, timeout=25)
-        if r.status_code == 401:
-            at = _refresh_access_token(spotify_user_id)
-            headers["Authorization"] = f"Bearer {at}"
-            r = requests.post(add_url, headers=headers, json={"uris": uris}, timeout=25)
-        if r.status_code == 429:
-            time.sleep(int(r.headers.get("Retry-After", "1")))
-            r = requests.post(add_url, headers=headers, json={"uris": uris}, timeout=25)
         r.raise_for_status()
-        total_added += len(chunk)
+        playlist = r.json()
+        playlist_id = playlist["id"]
+        playlist_url = playlist.get("external_urls", {}).get("spotify", "")
 
-    # 3) Verify final count
-    info = requests.get(
-        f"https://api.spotify.com/v1/playlists/{playlist_id}",
-        headers={"Authorization": f"Bearer {at}"},
-        params={"fields": "name,tracks.total,external_urls"},
-        timeout=20,
-    )
-    info.raise_for_status()
-    meta = info.json()
+        # 2) Add tracks in chunks of 100
+        if matched_ids:
+            add_url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+            headers = {"Authorization": f"Bearer {at}", "Content-Type": "application/json"}
+            for i in range(0, len(matched_ids), 100):
+                chunk = matched_ids[i:i+100]
+                rr = requests.post(add_url, headers=headers, json={"uris": [f"spotify:track:{tid}" for tid in chunk]}, timeout=25)
+                if rr.status_code == 429:
+                    time.sleep(int(rr.headers.get("Retry-After", "1")))
+                    rr = requests.post(add_url, headers=headers, json={"uris": [f"spotify:track:{tid}" for tid in chunk]}, timeout=25)
+                rr.raise_for_status()
 
-    # 4) Optional: persist conversion summary like your callback does
-    from .mongo import get_db
-    db = get_db()
-    conv_doc = {
-        "created_at": datetime.datetime.utcnow(),
-        "spotify_user_id": spotify_user_id,
-        "playlist_name": meta.get("name") or source_name,
-        "spotify_playlist_id": playlist_id,
-        "spotify_playlist_url": meta.get("external_urls", {}).get("spotify", playlist_url),
-        "total": len(ordered_ids),
-        "matched": total_added,   # we deduped, so 'matched' == attempted to add
-        "unmatched": max(0, len(ordered_ids) - total_added),
-        "source": "create_playlist_endpoint",
-        "public": make_public,
-    }
-    cid = db.conversions.insert_one(conv_doc).inserted_id
+        # 3) Persist conversion record
+        _conversions_col().insert_one({
+            "created_at": datetime.datetime.utcnow(),
+            "spotify_user_id": user_id,
+            "playlist_name": name,
+            "spotify_playlist_id": playlist_id,
+            "spotify_playlist_url": playlist_url,
+            "total": len(matched_ids),
+            "matched": len(matched_ids),
+            "unmatched": 0,
+            "source": f"job:{job_id}",
+        })
 
-    # Response consumed by the front-end
-    return JsonResponse({
-        "playlist_id": playlist_id,
-        "playlist_url": meta.get("external_urls", {}).get("spotify", playlist_url),
-        "name": meta.get("name") or source_name,
-        "total_tracks_added": meta.get("tracks", {}).get("total", total_added),
-        "public": make_public,
-        "conversion_id": str(cid),
-    })
+        sep = "&" if "?" in next_url else "?"
+        return redirect(f"{next_url}{sep}created=1&playlist_url={urllib.parse.quote(playlist_url)}")
 
+    # No job context → fallback
+    return redirect("/me")
+
+# ---------------------------------------------------------------------
+# Legacy utilities
+# ---------------------------------------------------------------------
 def conversion_detail(request, cid: str):
-    from .mongo import get_db
-    db = get_db()
-    conv = db.conversions.find_one({"_id": ObjectId(cid)})
+    conv = _conversions_col().find_one({"_id": ObjectId(cid)})
     if not conv:
         return HttpResponse("Conversion not found.", status=404)
-    misses = list(db.unmatched.find({"conversion_id": conv["_id"]}))
+    misses = list(_unmatched_col().find({"conversion_id": conv["_id"]}))
     html = f"""
     <h1>Conversion complete</h1>
     <p>Playlist: <b>{conv['playlist_name']}</b></p>
@@ -688,7 +505,7 @@ def conversion_detail(request, cid: str):
 def me(request):
     spotify_user_id = request.session.get("spotify_user_id")
     if not spotify_user_id:
-        return HttpResponse("Not logged in. Go to /preview and click Sign in with Spotify.", status=401)
+        return HttpResponse("Not logged in.", status=401)
     profile = _spotify_api(spotify_user_id, "GET", "/me")
     return HttpResponse(json.dumps({
         "id": profile.get("id"),

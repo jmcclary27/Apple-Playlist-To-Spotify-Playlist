@@ -2,23 +2,21 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Apple → Spotify: Upload & Match</title>
+  <title>Upload & Fetch</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; line-height: 1.45; }
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; line-height:1.45; }
     form { margin-bottom: 1rem; }
-    button { padding: 0.5rem 0.9rem; border-radius: 8px; border: 1px solid #444; cursor: pointer; }
-    table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
-    th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; font-size: 0.95rem; }
-    th { background: #f5f5f5; }
-    .btn-row { display: flex; gap: 0.5rem; margin: 0.75rem 0; flex-wrap: wrap; }
-    pre { background: #111; color: #eee; padding: 1rem; border-radius: 8px; overflow: auto; }
-    .muted { color: #666; font-size: 0.95rem; }
-    .success { color: #0a7a0a; }
-    .error { color: #b00020; white-space: pre-wrap; }
+    button, .btn { padding:0.5rem 0.9rem; border-radius:8px; border:1px solid #444; cursor:pointer; }
+    .muted { color:#666; }
+    table { border-collapse:collapse; width:100%; margin-top:0.5rem; }
+    th,td { border:1px solid #ddd; padding:0.5rem; text-align:left; font-size:0.95rem; }
+    th { background:#f5f5f5; }
   </style>
 </head>
 <body>
+  <a href="{% url 'landing' %}">← Home</a>
+  <h1>Apple → Spotify: Upload</h1>
 
   <!-- URL Import Form -->
   <form action="{% url 'upload' %}" method="post">
@@ -33,20 +31,16 @@
   {% endif %}
 
   {% if preview %}
-    <h2>Preview, first 10</h2>
+    <h2>Preview (first 10)</h2>
     <table>
-      <tr>
-        <th>Title</th><th>Artist</th><th>Album</th><th>ISRC</th><th>Norm Title</th><th>Norm Artist</th>
-      </tr>
+      <tr><th>Title</th><th>Artist</th><th>Album</th><th>ISRC</th></tr>
       {% for row in preview %}
-      <tr>
-        <td>{{ row.raw_title }}</td>
-        <td>{{ row.raw_artist }}</td>
-        <td>{{ row.raw_album }}</td>
-        <td>{{ row.raw_isrc }}</td>
-        <td>{{ row.norm_title }}</td>
-        <td>{{ row.norm_artist }}</td>
-      </tr>
+        <tr>
+          <td>{{ row.raw_title }}</td>
+          <td>{{ row.raw_artist }}</td>
+          <td>{{ row.raw_album }}</td>
+          <td>{{ row.raw_isrc }}</td>
+        </tr>
       {% endfor %}
     </table>
   {% endif %}
@@ -54,134 +48,26 @@
   {% if uploaded_ok %}
     <p><strong>{{ track_count }}</strong> tracks parsed and cached.</p>
 
-    <div class="btn-row">
-      <!-- Match buttons -->
-      <form id="match-sample" method="post" action="{% url 'match' %}">
-        {% csrf_token %}
-        <button type="submit">Run Sample Match</button>
-      </form>
-
-      <form id="match-all" method="post" action="{% url 'match' %}?scope=all">
-        {% csrf_token %}
-        <button type="submit">Run Full Match</button>
-      </form>
-
-      <!-- Create playlist button (disabled until a match finishes) -->
-      <button id="createPlaylistBtn" disabled
-              data-default-name="Imported from Apple Music">
-        Create Spotify Playlist
-      </button>
-    </div>
-
-    <!-- Output areas -->
-    <pre id="out" aria-live="polite"></pre>
-    <div id="createStatus" class="muted"></div>
+    <!-- Match button → starts a job, then redirects to progress page -->
+    <form id="startMatch" method="post" action="{% url 'match_start' %}">
+      {% csrf_token %}
+      <button type="submit">Match Playlist</button>
+      <span class="muted">You’ll see a progress screen while we match.</span>
+    </form>
 
     <script>
-      // --- tiny helpers ---
-      function getCookie(name) {
-        const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
-        return m ? m.pop() : '';
-      }
-      function show(el, msg, cls) {
-        el.className = cls || '';
-        el.textContent = msg;
-      }
-
-      document.addEventListener('DOMContentLoaded', () => {
-        const csrftoken = getCookie('csrftoken');
-        const out = document.getElementById('out');
-        const createBtn = document.getElementById('createPlaylistBtn');
-        const statusEl = document.getElementById('createStatus');
-
-        const MATCH_URL = "{% url 'match' %}";
-        const CREATE_URL = "{% url 'create_playlist' %}";
-        const SPOTIFY_LOGIN_URL = "{% url 'spotify_login' %}";
-
-        async function post(url, body, expectJson=true) {
-          console.log('POST', url, body);
-          const resp = await fetch(url, {
-            method: 'POST',
-            headers: {
-              'X-CSRFToken': csrftoken,
-              'Content-Type': 'application/json'
-            },
-            body: body ? JSON.stringify(body) : null
-          });
-
-          // Expose error body for visibility
-          const text = await resp.text();
-          console.log('Resp', resp.status, text);
-
-          // If JSON expected, try to parse; fall back to a wrapper
-          let payload = {};
-          try { payload = text ? JSON.parse(text) : {}; } catch {}
-
-          if (resp.status === 401) return { __unauthorized: true, ...payload };
-          if (!resp.ok) throw new Error(payload?.detail || payload?.error || text || `HTTP ${resp.status}`);
-          return expectJson ? (payload || {}) : {};
-        }
-
-        function enableCreate() {
-          createBtn.disabled = false;
-          show(statusEl, 'Matched tracks cached. You can create the Spotify playlist now.', 'muted');
-        }
-
-        // Sample match
-        document.getElementById('match-sample').addEventListener('submit', async (e) => {
-          e.preventDefault();
-          show(out, 'Running sample match…');
-          try {
-            const data = await post(MATCH_URL, null, true);
-            if (data.__unauthorized) { show(out, 'Unauthorized'); return; }
-            out.textContent = JSON.stringify(data, null, 2);
-            enableCreate();
-          } catch (err) {
-            show(out, 'Error: ' + err.message);
-          }
+      document.getElementById('startMatch').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const resp = await fetch("{% url 'match_start' %}", {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {'X-CSRFToken': document.cookie.split('csrftoken=')[1]?.split(';')[0] || ''},
         });
-
-        // Full match
-        document.getElementById('match-all').addEventListener('submit', async (e) => {
-          e.preventDefault();
-          show(out, 'Running full match…');
-          try {
-            const data = await post(MATCH_URL + '?scope=all', null, true);
-            if (data.__unauthorized) { show(out, 'Unauthorized'); return; }
-            out.textContent = JSON.stringify(data, null, 2);
-            enableCreate();
-          } catch (err) {
-            show(out, 'Error: ' + err.message);
-          }
-        });
-
-        // Create playlist
-        createBtn.addEventListener('click', async () => {
-          createBtn.disabled = true;
-          show(statusEl, 'Creating playlist on Spotify…', 'muted');
-
-          const nameFromServer = "{{ filename|escapejs }}";
-          const fallback = createBtn.dataset.defaultName || 'Imported from Apple Music';
-          const playlistName = nameFromServer && nameFromServer.trim() ? nameFromServer : fallback;
-
-          try {
-            const resp = await post(CREATE_URL, { source_name: playlistName, public: false }, true);
-            if (resp.__unauthorized) {
-              // Not logged into Spotify → start OAuth
-              window.location.href = SPOTIFY_LOGIN_URL;
-              return;
-            }
-            statusEl.innerHTML = `<span class="success">✅ Created:</span> <a href="${resp.playlist_url}" target="_blank" rel="noopener">${resp.name}</a>
-                                  <br/>Tracks added: ${resp.total_tracks_added}`;
-          } catch (err) {
-            statusEl.innerHTML = `<span class="error">Failed: ${err.message}</span>`;
-          } finally {
-            createBtn.disabled = false;
-          }
-        });
+        if (!resp.ok) { alert('Failed to start match'); return; }
+        const data = await resp.json();
+        if (data.job_id) window.location.href = `/match/progress/${data.job_id}`;
       });
     </script>
   {% endif %}
-
 </body>
 </html>

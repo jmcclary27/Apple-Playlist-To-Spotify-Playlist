@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Matching…</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; }
+    .bar { height:16px; background:#eee; border-radius:10px; overflow:hidden; }
+    .fill { height:100%; width:0%; background:#111; transition:width .4s ease; }
+    .pct { margin-top:.5rem; color:#555; }
+  </style>
+</head>
+<body>
+  <h1>Matching your playlist…</h1>
+  <div class="bar"><div id="fill" class="fill"></div></div>
+  <div id="pct" class="pct">0%</div>
+  <script>
+    const jobId = "{{ job_id }}";
+    async function poll() {
+      try {
+        const r = await fetch(`/api/match/status/${jobId}`);
+        const j = await r.json();
+        const pct = Math.max(0, Math.min(100, j.progress || 0));
+        document.getElementById('fill').style.width = pct + '%';
+        document.getElementById('pct').textContent = pct + '%';
+        if (j.status === 'done') {
+          window.location.href = `/match/results/${jobId}`;
+        } else if (j.status === 'error') {
+          alert('Matching failed: ' + (j.error || 'unknown error'));
+        } else {
+          setTimeout(poll, 800);
+        }
+      } catch(e) {
+        setTimeout(poll, 1200);
+      }
+    }
+    poll();
+  </script>
+</body>
+</html>
