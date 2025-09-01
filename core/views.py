@@ -12,6 +12,35 @@ import uuid
 import requests  # you already import below, ok if duplicated once
 from pymongo import ReturnDocument
 
+# core/views.py
+from django.conf import settings
+from django.views.decorators.http import require_GET
+from django.http import JsonResponse
+import time, os
+
+@require_GET
+def debug_status(request):
+    return JsonResponse({
+        # tokens in session?
+        "has_user_token": bool(request.session.get("spotify_access_token")),
+        "user_token_expires_in": (
+            (request.session.get("spotify_expires_at") or 0) - int(time.time())
+        ),
+        "has_refresh_token": bool(request.session.get("spotify_refresh_token")),
+        # app creds present?
+        "has_client_id": bool(os.environ.get("SPOTIFY_CLIENT_ID")),
+        "has_client_secret": bool(os.environ.get("SPOTIFY_CLIENT_SECRET")),
+        # app token cached?
+        "has_app_token": bool(request.session.get("spotify_app_access_token")),
+        "app_token_expires_in": (
+            (request.session.get("spotify_app_expires_at") or 0) - int(time.time())
+        ),
+        # host/csrf
+        "allowed_hosts": settings.ALLOWED_HOSTS,
+        "csrf_trusted_origins": getattr(settings, "CSRF_TRUSTED_ORIGINS", []),
+    })
+
+
 # ----- helper: how you fetch the Spotify token -----
 def _get_spotify_token(request):
     """
