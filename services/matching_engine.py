@@ -264,9 +264,30 @@ def match_one_track(
     query_trace: List[Tuple[str, int]] = []  # optional for debugging
 
     def do_search(q: str, limit: int = 50) -> List[dict]:
-        params = {"q": q, "type": "track", "limit": limit, "market": "from_token"}
-        data = sp._request("GET", SPOTIFY_SEARCH_URL, params)
-        return (data or {}).get("tracks", {}).get("items", [])
+        base = {"q": q, "type": "track", "limit": limit}
+        attempts = [  # client-credentials safe first
+            {},                 # no market (works with app-only tokens)
+            {"market": "US"},   # explicit country fallback
+            # {"market": "from_token"},  # only enable if you KNOW you have a user token
+        ]
+        last_err = None
+        for extra in attempts:
+            try:
+                data = sp._request("GET", SPOTIFY_SEARCH_URL, {**base, **extra})
+                items = (data or {}).get("tracks", {}).get("items", []) or []
+                if items:
+                    return items
+            except Exception as e:
+                last_err = str(e)[:120]
+                # swallow and try the next attempt
+                continue
+        # attach a tiny hint to query_trace if present (safe no-op if absent)
+        try:
+            query_trace.append((f"err:{last_err or 'no_items'}", 0))
+        except Exception:
+            pass
+        return []
+
 
     artist_try = _artist_variants_local(raw_artist)
     if not artist_try:
