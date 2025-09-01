@@ -33,5 +33,6 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('upload/', core_views.upload_link, name='upload'),
     path('match/', core_views.match_view, name='match'),
+    path("playlist/create", core_views.create_spotify_playlist, name="create_playlist"),
     path("debug/status", core_views.debug_status),
 ]

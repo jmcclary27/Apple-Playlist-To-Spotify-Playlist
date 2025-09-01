@@ -11,9 +11,11 @@
     table { border-collapse: collapse; width: 100%; margin-top: 0.5rem; }
     th, td { border: 1px solid #ddd; padding: 0.5rem; text-align: left; font-size: 0.95rem; }
     th { background: #f5f5f5; }
-    .btn-row { display: flex; gap: 0.5rem; margin: 0.75rem 0; }
+    .btn-row { display: flex; gap: 0.5rem; margin: 0.75rem 0; flex-wrap: wrap; }
     pre { background: #111; color: #eee; padding: 1rem; border-radius: 8px; overflow: auto; }
     .muted { color: #666; font-size: 0.95rem; }
+    .success { color: #0a7a0a; }
+    .error { color: #b00020; white-space: pre-wrap; }
   </style>
 </head>
 <body>
@@ -52,8 +54,8 @@
   {% if uploaded_ok %}
     <p><strong>{{ track_count }}</strong> tracks parsed and cached.</p>
 
-    <!-- Simple POST forms (JS intercepts to show JSON inline) -->
     <div class="btn-row">
+      <!-- Match buttons -->
       <form id="match-sample" method="post" action="{% url 'match' %}">
         {% csrf_token %}
         <button type="submit">Run Sample Match</button>
@@ -63,10 +65,17 @@
         {% csrf_token %}
         <button type="submit">Run Full Match</button>
       </form>
+
+      <!-- Create playlist button (disabled until a match finishes) -->
+      <button id="createPlaylistBtn" disabled
+              data-default-name="Imported from Apple Music">
+        Create Spotify Playlist
+      </button>
     </div>
 
-    <!-- JSON output area -->
+    <!-- Output areas -->
     <pre id="out" aria-live="polite"></pre>
+    <div id="createStatus" class="muted"></div>
 
     <script>
       // CSRF cookie helper
@@ -74,36 +83,93 @@
         const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
         return m ? m.pop() : '';
       }
+      const csrftoken = getCookie('csrftoken');
 
-      async function postJSON(url) {
+      async function post(url, body, expectJson=true) {
         const resp = await fetch(url, {
           method: 'POST',
-          headers: { 'X-CSRFToken': getCookie('csrftoken') }
+          headers: {
+            'X-CSRFToken': csrftoken,
+            'Content-Type': 'application/json'
+          },
+          body: body ? JSON.stringify(body) : null
         });
+        if (resp.status === 401) return { __unauthorized: true };
         if (!resp.ok) {
           const text = await resp.text();
-          return { error: resp.status + ' ' + resp.statusText, body: text };
+          throw new Error(text || `HTTP ${resp.status}`);
         }
-        return resp.json();
+        return expectJson ? resp.json() : {};
       }
 
       const out = document.getElementById('out');
+      const createBtn = document.getElementById('createPlaylistBtn');
+      const statusEl = document.getElementById('createStatus');
       const MATCH_URL = "{% url 'match' %}";
+      const CREATE_URL = "{% url 'create_playlist' %}";
 
-      // Intercept Sample form
+      // Enable Create button after any successful match
+      function enableCreate() {
+        createBtn.disabled = false;
+        statusEl.textContent = 'Matched tracks cached. You can create the Spotify playlist now.';
+      }
+
+      // Intercept Sample match
       document.getElementById('match-sample').addEventListener('submit', async (e) => {
         e.preventDefault();
         out.textContent = 'Running sample match…';
-        const data = await postJSON(MATCH_URL);
-        out.textContent = JSON.stringify(data, null, 2);
+        try {
+          const data = await post(MATCH_URL, null, true);
+          if (data.__unauthorized) { out.textContent = 'Unauthorized'; return; }
+          out.textContent = JSON.stringify(data, null, 2);
+          enableCreate();
+        } catch (err) {
+          out.textContent = 'Error: ' + err.message;
+        }
       });
 
-      // Intercept Full form
+      // Intercept Full match
       document.getElementById('match-all').addEventListener('submit', async (e) => {
         e.preventDefault();
         out.textContent = 'Running full match…';
-        const data = await postJSON(MATCH_URL + '?scope=all');
-        out.textContent = JSON.stringify(data, null, 2);
+        try {
+          const data = await post(MATCH_URL + '?scope=all', null, true);
+          if (data.__unauthorized) { out.textContent = 'Unauthorized'; return; }
+          out.textContent = JSON.stringify(data, null, 2);
+          enableCreate();
+        } catch (err) {
+          out.textContent = 'Error: ' + err.message;
+        }
+      });
+
+      // Create playlist click
+      createBtn.addEventListener('click', async () => {
+        createBtn.disabled = true;
+        statusEl.textContent = 'Creating playlist on Spotify…';
+
+        // Prefer the filename shown above; fall back to a default
+        const nameFromServer = "{{ filename|escapejs }}";
+        const fallback = createBtn.dataset.defaultName || 'Imported from Apple Music';
+        const playlistName = nameFromServer && nameFromServer.trim() ? nameFromServer : fallback;
+
+        try {
+          const resp = await post(CREATE_URL, {
+            source_name: playlistName,
+            public: false
+            // No need to send track IDs; server uses cached match in session.
+          });
+          if (resp.__unauthorized) {
+            // Not logged in with Spotify → start OAuth
+            window.location.href = "{% url 'spotify_login' %}";
+            return;
+          }
+          statusEl.innerHTML = `<span class="success">✅ Created:</span> <a href="${resp.playlist_url}" target="_blank" rel="noopener">${resp.name}</a>
+                                <br/>Tracks added: ${resp.total_tracks_added}`;
+        } catch (err) {
+          statusEl.innerHTML = `<span class="error">Failed: ${err.message}</span>`;
+        } finally {
+          createBtn.disabled = false;
+        }
       });
     </script>
   {% endif %}

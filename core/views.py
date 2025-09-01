@@ -95,14 +95,6 @@ def _get_any_spotify_token(request):
 # ---------------------------------------------------------------------
 @require_POST
 def match_view(request):
-    """
-    Runs the matching engine on either:
-      - the sample cached in session (default), or
-      - the full list cached in session, or
-      - an explicit list sent in the POST body as JSON (advanced).
-
-    Use query param scope=sample|all to choose session source.
-    """
     access_token = _get_any_spotify_token(request)
     if not access_token:
         return HttpResponseBadRequest(
@@ -110,7 +102,6 @@ def match_view(request):
             "Set SPOTIFY_CLIENT_ID/SECRET on Render or complete Spotify login."
         )
 
-    # Choose track source
     scope = (request.GET.get("scope") or "sample").lower()
     if scope == "all":
         apple_tracks = request.session.get("apple_tracks_all") or []
@@ -130,7 +121,19 @@ def match_view(request):
         return HttpResponseBadRequest("No tracks found. Upload first, or POST a JSON body with {'tracks': [...]}.")
 
     data = match_tracks(access_token, apple_tracks, fuzzy_threshold=85)
+
+    # NEW: extract spotify IDs and cache for playlist creation
+    try:
+        ids = _extract_spotify_ids_from_match_result(data)
+        request.session["matched_spotify_ids"] = ids
+        request.session["matched_scope"] = scope
+        request.session.modified = True
+    except Exception:
+        # non-fatal; creation endpoint can still accept IDs from POST if you send them
+        pass
+
     return JsonResponse(data, safe=False)
+
 
 # ---------------------------------------------------------------------
 # Simple smoke routes
@@ -286,6 +289,51 @@ def _spotify_api(spotify_user_id: str, method: str, path: str, **kwargs):
     r.raise_for_status()
     return r.json() if r.content else {}
 
+# --- Helpers to extract Spotify IDs from arbitrary match output ---
+
+_SPOTIFY_ID_RE = re.compile(r'\b[0-9A-Za-z]{22}\b')  # typical base62 track id
+
+def _walk(obj):
+    """Yield all dicts & values in a nested structure."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k, v
+            yield from _walk(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk(v)
+
+def _extract_spotify_ids_from_match_result(match_result) -> list[str]:
+    """
+    Try hard to find track IDs inside whatever shape match_tracks() returned.
+    Looks for keys like 'spotify_id', 'id', 'track_id', etc., and also scans strings for 22-char ids.
+    """
+    ids: list[str] = []
+    def add(x: str):
+        if x and isinstance(x, str) and _SPOTIFY_ID_RE.fullmatch(x):
+            ids.append(x)
+
+    candidate_keys = {"spotify_id", "id", "track_id", "trackId", "spotify_track_id"}
+
+    for k, v in _walk(match_result):
+        # Keyed values
+        if isinstance(k, str) and k in candidate_keys and isinstance(v, str):
+            add(v)
+        # Strings that might contain URIs / URLs
+        if isinstance(v, str):
+            # 'spotify:track:<id>' or URLs -> pull the last 22 chars if present
+            m = _SPOTIFY_ID_RE.search(v)
+            if m:
+                add(m.group(0))
+    # Preserve order while deduping
+    seen = set()
+    out = []
+    for tid in ids:
+        if tid not in seen:
+            seen.add(tid)
+            out.append(tid)
+    return out
+
 def _spotify_me(access_token: str):
     r = requests.get("https://api.spotify.com/v1/me",
                      headers={"Authorization": f"Bearer {access_token}"}, timeout=20)
@@ -403,6 +451,133 @@ def spotify_callback(request):
     request.session.pop("parsed_items", None)
     request.session.pop("playlist_name", None)
     return redirect("conversion_detail", cid=str(cid))
+
+@require_POST
+def create_spotify_playlist(request):
+    """
+    Creates a Spotify playlist for the current user and fills it with the
+    most-recent matched Spotify track IDs saved in the session by match_view().
+    Optionally accept a JSON body:
+      { "source_name": "My List", "public": false, "track_ids_in_order": ["..."] }
+    If track_ids_in_order is omitted, we use session 'matched_spotify_ids'.
+    """
+    # Ensure user has logged into Spotify (so we have their user id + refreshable tokens)
+    spotify_user_id = request.session.get("spotify_user_id")
+    if not spotify_user_id:
+        return HttpResponse(status=401)  # front-end will redirect to /auth/spotify/login
+
+    # Inputs
+    try:
+        payload = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    source_name = payload.get("source_name") or "Imported from Apple Music"
+    make_public = bool(payload.get("public", False))
+
+    # Track IDs to use
+    ids = payload.get("track_ids_in_order")
+    if not ids:
+        ids = request.session.get("matched_spotify_ids") or []
+    if not ids:
+        return HttpResponseBadRequest("No matched Spotify track IDs found. Run a match first.")
+
+    # Dedupe while preserving order
+    seen = set()
+    ordered_ids = []
+    for tid in ids:
+        if tid and tid not in seen:
+            seen.add(tid)
+            ordered_ids.append(tid)
+
+    # Valid access token (refresh if needed)
+    at = _get_valid_access_token(spotify_user_id)
+
+    # 1) Create the playlist
+    create_resp = requests.post(
+        f"https://api.spotify.com/v1/users/{spotify_user_id}/playlists",
+        headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
+        json={
+            "name": source_name,
+            "description": "Imported via Apple→Spotify by am2spot",
+            "public": make_public,
+            "collaborative": False
+        },
+        timeout=20,
+    )
+    if create_resp.status_code == 401:
+        # refresh and retry once
+        at = _refresh_access_token(spotify_user_id)
+        create_resp = requests.post(
+            f"https://api.spotify.com/v1/users/{spotify_user_id}/playlists",
+            headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
+            json={
+                "name": source_name,
+                "description": "Imported via Apple→Spotify by am2spot",
+                "public": make_public,
+                "collaborative": False
+            },
+            timeout=20,
+        )
+    create_resp.raise_for_status()
+    playlist = create_resp.json()
+    playlist_id = playlist["id"]
+    playlist_url = playlist.get("external_urls", {}).get("spotify", "")
+
+    # 2) Add tracks in chunks of 100
+    total_added = 0
+    add_url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+    headers = {"Authorization": f"Bearer {at}", "Content-Type": "application/json"}
+
+    for i in range(0, len(ordered_ids), 100):
+        chunk = ordered_ids[i:i+100]
+        uris = [f"spotify:track:{tid}" for tid in chunk]
+        r = requests.post(add_url, headers=headers, json={"uris": uris}, timeout=25)
+        if r.status_code == 401:
+            at = _refresh_access_token(spotify_user_id)
+            headers["Authorization"] = f"Bearer {at}"
+            r = requests.post(add_url, headers=headers, json={"uris": uris}, timeout=25)
+        if r.status_code == 429:
+            time.sleep(int(r.headers.get("Retry-After", "1")))
+            r = requests.post(add_url, headers=headers, json={"uris": uris}, timeout=25)
+        r.raise_for_status()
+        total_added += len(chunk)
+
+    # 3) Verify final count
+    info = requests.get(
+        f"https://api.spotify.com/v1/playlists/{playlist_id}",
+        headers={"Authorization": f"Bearer {at}"},
+        params={"fields": "name,tracks.total,external_urls"},
+        timeout=20,
+    )
+    info.raise_for_status()
+    meta = info.json()
+
+    # 4) Optional: persist conversion summary like your callback does
+    from .mongo import get_db
+    db = get_db()
+    conv_doc = {
+        "created_at": datetime.datetime.utcnow(),
+        "spotify_user_id": spotify_user_id,
+        "playlist_name": meta.get("name") or source_name,
+        "spotify_playlist_id": playlist_id,
+        "spotify_playlist_url": meta.get("external_urls", {}).get("spotify", playlist_url),
+        "total": len(ordered_ids),
+        "matched": total_added,   # we deduped, so 'matched' == attempted to add
+        "unmatched": max(0, len(ordered_ids) - total_added),
+        "source": "create_playlist_endpoint",
+        "public": make_public,
+    }
+    cid = db.conversions.insert_one(conv_doc).inserted_id
+
+    # Response consumed by the front-end
+    return JsonResponse({
+        "playlist_id": playlist_id,
+        "playlist_url": meta.get("external_urls", {}).get("spotify", playlist_url),
+        "name": meta.get("name") or source_name,
+        "total_tracks_added": meta.get("tracks", {}).get("total", total_added),
+        "public": make_public,
+        "conversion_id": str(cid),
+    })
 
 def conversion_detail(request, cid: str):
     from .mongo import get_db
