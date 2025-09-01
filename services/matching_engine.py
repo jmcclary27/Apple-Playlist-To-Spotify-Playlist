@@ -120,37 +120,27 @@ def match_one_track(
     fuzzy_threshold: int = 85,
 ) -> Dict[str, Any]:
     """
-    Inputs:
-      - sp: SpotifyClient (handles auth/throttle)
-      - track: dict with at least Title/Artist; ideally Album, ISRC, duration_ms
-      - cache: dict shared across a job (for ISRC and query results)
-      - fuzzy_threshold: score boundary for 'fuzzy_matched' (default 85)
-
-    Returns:
-      {
-        "status": "matched"|"fuzzy_matched"|"not_found",
-        "spotify_id": str|None,
-        "method": "isrc"|"query_exact_norm"|"fuzzy"|"none",
-        "score": int,
-        "debug": {...}
-      }
+    Matching pipeline for a single Apple track dict.
+    Expects (case/space tolerant) keys like: Title/title, Artist/artist, Album/album, ISRC/isrc, duration_ms.
+    Returns: {status, spotify_id, method, score, debug}
     """
-    title   = _get(track, "Title", "title")
-    artist  = _get(track, "Artist", "artist")
-    album   = _get(track, "Album", "album")
-    isrc    = _get(track, "ISRC", "isrc").strip()
-    dur_ms  = track.get("duration_ms")
+    # Raw fields (preserve punctuation for search strength)
+    title  = _get(track, "Title", "title")
+    artist = _get(track, "Artist", "artist")
+    album  = _get(track, "Album", "album")
+    isrc   = (_get(track, "ISRC", "isrc") or "").strip()
+    dur_ms = track.get("duration_ms")
 
-    # normalized fields (uses your precomputed Norm Title/Artist if present)
+    # Normalized triplet (uses your Norm Title/Artist if present; see your helper)
     nt, na, nb = normalized_triplet_from_track(track)
 
     # ---------------- 1) ISRC fast path ----------------
     if isrc:
-        key = f"isrc:{isrc}"
-        cand = cache.get(key)
+        k = f"isrc:{isrc}"
+        cand = cache.get(k)
         if cand is None:
             cand = sp.search_by_isrc(isrc)
-            cache[key] = cand
+            cache[k] = cand
         if cand:
             return {
                 "status": "matched",
@@ -161,31 +151,74 @@ def match_one_track(
                     "reason": "isrc exact",
                     "spotify_name": cand.get("name"),
                     "artists": [a["name"] for a in cand.get("artists", [])],
-                    "album": cand.get("album", {}).get("name"),
+                    "album": (cand.get("album") or {}).get("name"),
                 },
             }
 
-    # ---------------- 2) Structured query (normalized) ----------------
-    qkey = f"q:{nt}|{na}|{nb}"
-    candidates = cache.get(qkey)
-    if candidates is None:
-        # build fielded query; include album if available
-        parts = []
-        if nt: parts.append(f'track:"{nt}"')
-        if na: parts.append(f'artist:"{na}"')
-        if nb: parts.append(f'album:"{nb}"')
-        q = " ".join(parts).strip()
-        if not q:
-            q = " ".join(x for x in [title, artist, album] if x).strip()
-        data = sp._request("GET", SPOTIFY_SEARCH_URL, {"q": q, "type": "track", "limit": 10})
-        candidates = (data or {}).get("tracks", {}).get("items", [])
-        cache[qkey] = candidates
+    # ---------------- 2) Structured search (RAW first, then normalized) ----------------
+    raw_title, raw_artist, raw_album = title, artist, album
+    candidates: List[dict] = []
 
-    # Quick normalized exact-ish check (title+artist match after normalization)
+    def do_search(q: str, limit: int = 20) -> List[dict]:
+        data = sp._request("GET", SPOTIFY_SEARCH_URL, {"q": q, "type": "track", "limit": limit})
+        return (data or {}).get("tracks", {}).get("items", [])
+
+    query_variants: List[Tuple[str, str]] = []
+
+    # 1) RAW fielded with album
+    parts = []
+    if raw_title:  parts.append(f'track:"{raw_title}"')
+    if raw_artist: parts.append(f'artist:"{raw_artist}"')
+    if raw_album:  parts.append(f'album:"{raw_album}"')
+    if parts: query_variants.append(("q:raw_t+a+b", " ".join(parts)))
+
+    # 2) RAW fielded title+artist
+    parts = []
+    if raw_title:  parts.append(f'track:"{raw_title}"')
+    if raw_artist: parts.append(f'artist:"{raw_artist}"')
+    if parts: query_variants.append(("q:raw_t+a", " ".join(parts)))
+
+    # 3) NORMALIZED fielded with album
+    parts = []
+    if nt: parts.append(f'track:"{nt}"')
+    if na: parts.append(f'artist:"{na}"')
+    if nb: parts.append(f'album:"{nb}"')
+    if parts: query_variants.append(("q:norm_t+a+b", " ".join(parts)))
+
+    # 4) NORMALIZED fielded title+artist
+    parts = []
+    if nt: parts.append(f'track:"{nt}"')
+    if na: parts.append(f'artist:"{na}"')
+    if parts: query_variants.append(("q:norm_t+a", " ".join(parts)))
+
+    # 5) RAW free-text fallback
+    ft = " ".join(x for x in [raw_title, raw_artist] if x).strip()
+    if ft:
+        query_variants.append(("q:raw_free", ft))
+
+    # Execute ladder with per-variant cache; merge & dedupe by id
+    seen: set = set()
+    for key_prefix, q in query_variants:
+        qkey = f"{key_prefix}|{q}"
+        got = cache.get(qkey)
+        if got is None:
+            got = do_search(q, limit=20)
+            cache[qkey] = got
+        if got:
+            for c in got:
+                cid = c.get("id")
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    candidates.append(c)
+        # stop early once we have a decent pool
+        if len(candidates) >= 12:
+            break
+
+    # ---------------- 2a) Quick normalized exact-ish check ----------------
     if candidates:
         for c in candidates:
             if normalize_title(c.get("name", "")) == nt:
-                sp_art = ", ".join(a["name"] for a in c.get("artists", []))
+                sp_art = ", ".join(a["name"] for a in c.get("artists", []) if a.get("name"))
                 if normalize_artist(sp_art) == na:
                     return {
                         "status": "matched",
@@ -196,7 +229,7 @@ def match_one_track(
                             "reason": "normalized title and artist match",
                             "spotify_name": c.get("name"),
                             "artists": [a["name"] for a in c.get("artists", [])],
-                            "album": c.get("album", {}).get("name"),
+                            "album": (c.get("album") or {}).get("name"),
                         },
                     }
 
@@ -208,16 +241,20 @@ def match_one_track(
 
         for c in candidates:
             sp_title   = c.get("name", "")
-            sp_artists = ", ".join(a["name"] for a in c.get("artists", [])) if c.get("artists") else ""
-            sp_album   = c.get("album", {}).get("name", "")
+            sp_artists = ", ".join(a["name"] for a in c.get("artists", []) if a.get("name")) if c.get("artists") else ""
+            sp_album   = (c.get("album") or {}).get("name", "")
             sp_dur     = c.get("duration_ms")
 
             s_title  = fuzz.token_set_ratio(nt, normalize_title(sp_title))
             s_artist = fuzz.token_set_ratio(na, normalize_artist(sp_artists))
             s_album  = fuzz.token_set_ratio(nb, normalize_album(sp_album)) if nb else 0
 
-            # Weighted blend: title 55%, artist 35%, album 10%
+            # Weighted blend
             overall = round(0.55 * s_title + 0.35 * s_artist + 0.10 * s_album)
+
+            # tiny bonus if normalized titles are exact
+            if normalize_title(sp_title) == nt:
+                overall += 1
 
             # tiny duration bonus if within ±3s
             dur_bonus = 0
@@ -225,9 +262,8 @@ def match_one_track(
                 dur_bonus = 3
                 overall += dur_bonus
 
-            # tie-break on (overall, album score, closer duration)
             dur_delta = abs((dur_ms or 10**9) - (sp_dur or 10**9))
-            current_key = (overall, s_album, -dur_delta)
+            tie_key = (overall, s_album, -dur_delta)  # prefer better score, album, then closer duration
 
             prev_key = (
                 best_score,
@@ -235,7 +271,7 @@ def match_one_track(
                 -best_dbg.get("duration_delta_ms", 10**9),
             )
 
-            if (best is None) or (current_key > prev_key):
+            if (best is None) or (tie_key > prev_key):
                 best = c
                 best_score = overall
                 best_dbg = {
@@ -263,7 +299,7 @@ def match_one_track(
                 "debug": {
                     "spotify_name": best.get("name"),
                     "artists": [a["name"] for a in best.get("artists", [])],
-                    "album": best.get("album", {}).get("name"),
+                    "album": (best.get("album") or {}).get("name"),
                     **best_dbg,
                 },
             }
@@ -276,6 +312,7 @@ def match_one_track(
         "score": 0,
         "debug": {"reason": "no viable candidates"},
     }
+
 
 # --- add helper to read multiple possible keys (case/space tolerant) ---
 def _get(d, *names, default=""):

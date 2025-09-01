@@ -41,21 +41,59 @@ def _lookup_tracks_itunes(ids):
     data = requests.get(url, timeout=10).json()
     return {str(item['trackId']): item for item in data.get('results', []) if 'trackId' in item}
 
+# --- put these near the top of matching_engine.py (or reuse your existing ones) ---
+import re, unicodedata
+
+PARENS_RE      = re.compile(r"\s*[\(\[][^)\]]*[\)\]]\s*")
+SUFFIXES_RE    = re.compile(
+    r"\s*-\s*(?:remaster(?:ed)?(?:\s*\d{2,4})?|live|mono|stereo|single version|radio edit|deluxe|explicit)\b.*",
+    re.I,
+)
+FEAT_TRAIL_RE  = re.compile(r"\s+(?:feat|ft)\.?\s+.*$", re.I)  # remove trailing "feat. X" parts
+WHITESPACE_RE  = re.compile(r"\s+")
+
+def _deaccent(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+def _unify(s: str) -> str:
+    # normalize curly quotes/dashes, keep apostrophes
+    return (s.replace("’", "'")
+             .replace("‘", "'")
+             .replace("“", '"')
+             .replace("”", '"')
+             .replace("—", " ")
+             .replace("–", " ")
+             .replace("-", " "))
+
 def normalize_title(title: str) -> str:
-    import re, unicodedata
-    if not title: return ''
-    s = unicodedata.normalize('NFKD', title)
-    s = ''.join(c for c in s if not unicodedata.combining(c))
-    s = re.sub(r'\(.*?\)|\[.*?\]', '', s)
-    s = s.lower()
-    s = re.sub(r'[^a-z0-9\s]', ' ', s)
-    return re.sub(r'\s+', ' ', s).strip()
+    if not title:
+        return ""
+    t = _unify(title)
+    t = _deaccent(t)
+    # remove ( ... ) and [ ... ] segments
+    t = PARENS_RE.sub(" ", t)
+    # drop trailing "feat. X" if present
+    t = FEAT_TRAIL_RE.sub(" ", t)
+    # drop common suffixes like "- remaster", "- live", etc.
+    t = SUFFIXES_RE.sub("", t)
+    t = t.lower()
+    # keep letters/digits/space and apostrophes/&; strip other punctuation
+    t = re.sub(r"[^a-z0-9\s'&]", " ", t)
+    t = WHITESPACE_RE.sub(" ", t).strip()
+    return t
 
 def normalize_artist(artist: str) -> str:
-    if not artist: return ''
-    s = artist.lower()
-    s = re.sub(r'[^a-z0-9\s&]', ' ', s)
-    return re.sub(r'\s+', ' ', s).strip()
+    if not artist:
+        return ""
+    a = _unify(artist)
+    a = _deaccent(a)
+    # artists often have "feat."—trim everything after that
+    a = FEAT_TRAIL_RE.sub(" ", a)
+    a = a.lower()
+    # keep letters/digits/space and apostrophes/&
+    a = re.sub(r"[^a-z0-9\s'&]", " ", a)
+    a = WHITESPACE_RE.sub(" ", a).strip()
+    return a
 
 def parse_apple_playlist_from_url(url: str):
     if not is_apple_playlist_url(url):
