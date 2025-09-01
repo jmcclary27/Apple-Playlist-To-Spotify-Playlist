@@ -296,46 +296,61 @@ def _spotify_api(spotify_user_id: str, method: str, path: str, **kwargs):
 
 _SPOTIFY_ID_RE = re.compile(r'\b[0-9A-Za-z]{22}\b')  # typical base62 track id
 
-def _walk(obj):
-    """Yield all dicts & values in a nested structure."""
+# --- Robust extractor: finds IDs in dicts, lists, URIs, and URLs ---
+_SPOTIFY_ID_RE = re.compile(r'\b[0-9A-Za-z]{22}\b')  # base62 track id (22 chars)
+
+def _iter_scalars(obj):
+    """Yield every scalar value (including strings in lists), and dict keys too."""
     if isinstance(obj, dict):
         for k, v in obj.items():
-            yield k, v
-            yield from _walk(v)
+            yield ("key", k)
+            yield from _iter_scalars(v)
     elif isinstance(obj, list):
         for v in obj:
-            yield from _walk(v)
+            yield from _iter_scalars(v)
+    else:
+        yield ("value", obj)
 
 def _extract_spotify_ids_from_match_result(match_result) -> list[str]:
     """
-    Try hard to find track IDs inside whatever shape match_tracks() returned.
-    Looks for keys like 'spotify_id', 'id', 'track_id', etc., and also scans strings for 22-char ids.
+    Pull 22-char Spotify track IDs out of ANY nested structure:
+    - dicts with keys like spotify_id/id/track_id/...
+    - lists of strings (IDs, URIs, URLs)
+    - strings containing URIs (spotify:track:ID) or URLs (…/track/ID)
     """
     ids: list[str] = []
-    def add(x: str):
-        if x and isinstance(x, str) and _SPOTIFY_ID_RE.fullmatch(x):
-            ids.append(x)
+    candidate_keys = {"spotify_id", "id", "track_id", "trackId", "spotify_track_id", "spotifyId", "spotify_uri", "uri"}
 
-    candidate_keys = {"spotify_id", "id", "track_id", "trackId", "spotify_track_id"}
+    def add(raw: str | None):
+        if not isinstance(raw, str): return
+        # If it's a full URI/URL, extract the 22-char token; else try direct match
+        m = _SPOTIFY_ID_RE.search(raw)
+        if m:
+            tok = m.group(0)
+            ids.append(tok)
 
-    for k, v in _walk(match_result):
-        # Keyed values
-        if isinstance(k, str) and k in candidate_keys and isinstance(v, str):
-            add(v)
-        # Strings that might contain URIs / URLs
-        if isinstance(v, str):
-            # 'spotify:track:<id>' or URLs -> pull the last 22 chars if present
-            m = _SPOTIFY_ID_RE.search(v)
-            if m:
-                add(m.group(0))
-    # Preserve order while deduping
-    seen = set()
-    out = []
+    for kind, val in _iter_scalars(match_result):
+        if kind == "key" and isinstance(val, str):
+            # we only use keys to bias, real extraction happens on values below
+            continue
+        # Values: if it’s a dict value under a “candidate” key, or any string at all
+        if isinstance(val, str):
+            add(val)
+        elif isinstance(val, dict):
+            # If a dict contains a candidate key with a string, add it
+            for k2 in candidate_keys:
+                v2 = val.get(k2)
+                if isinstance(v2, str):
+                    add(v2)
+
+    # Dedup while preserving order
+    seen, out = set(), []
     for tid in ids:
         if tid not in seen:
             seen.add(tid)
             out.append(tid)
     return out
+
 
 def _spotify_me(access_token: str):
     r = requests.get("https://api.spotify.com/v1/me",
