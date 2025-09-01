@@ -28,6 +28,7 @@ def debug_status(request):
         "app_token_expires_in": (request.session.get("spotify_app_expires_at") or 0) - int(time.time()),
         "allowed_hosts": settings.ALLOWED_HOSTS,
         "csrf_trusted_origins": getattr(settings, "CSRF_TRUSTED_ORIGINS", []),
+        # NEW
         "matched_spotify_ids_count": len(request.session.get("matched_spotify_ids") or []),
         "matched_scope": request.session.get("matched_scope"),
         "matched_summary": request.session.get("matched_summary"),
@@ -96,6 +97,25 @@ def _get_any_spotify_token(request):
 # ---------------------------------------------------------------------
 # Match endpoint (POST only)
 # ---------------------------------------------------------------------
+def _collect_matched_ids_schema_aware(payload) -> list[str]:
+    """
+    Fallback collector tailored to your matcher shape:
+      {"summary": {...}, "results": [ { "status": "...", "spotify_id": "..." }, ... ]}
+    Keeps only matched/fuzzy_matched. Dedupe and preserve order.
+    """
+    ids = []
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        seen = set()
+        for row in payload["results"]:
+            if not isinstance(row, dict):
+                continue
+            if row.get("status") in ("matched", "fuzzy_matched"):
+                tid = row.get("spotify_id")
+                if isinstance(tid, str) and len(tid) == 22 and tid not in seen:
+                    seen.add(tid)
+                    ids.append(tid)
+    return ids
+
 @require_POST
 def match_view(request):
     access_token = _get_any_spotify_token(request)
@@ -121,42 +141,44 @@ def match_view(request):
             pass
 
     if not apple_tracks:
-        return HttpResponseBadRequest(
-            "No tracks found. Upload first, or POST a JSON body with {'tracks': [...]}."
-        )
+        return HttpResponseBadRequest("No tracks found. Upload first, or POST a JSON body with {'tracks': [...]}.")
 
     # Run matcher
     data = match_tracks(access_token, apple_tracks, fuzzy_threshold=85)
 
-    # ---- store matched Spotify IDs in the session ----
-    # 1) primary: use your extractor
-    ids = []
+    # ---- persist matched Spotify IDs in the session ----
+    ids: list[str] = []
+    # Primary: your generic extractor (handles URIs/URLs/strings)
     try:
         ids = _extract_spotify_ids_from_match_result(data) or []
     except Exception:
         ids = []
 
-    # 2) fallback (schema-aware): only keep rows marked matched/fuzzy_matched
-    if not ids and isinstance(data, dict) and isinstance(data.get("results"), list):
-        seen = set()
-        for row in data["results"]:
-            if not isinstance(row, dict):
-                continue
-            if row.get("status") in ("matched", "fuzzy_matched"):
-                tid = row.get("spotify_id")
-                if isinstance(tid, str) and len(tid) == 22 and tid not in seen:
-                    seen.add(tid)
-                    ids.append(tid)
+    # Fallback: schema-aware (uses "results" with status + spotify_id)
+    if not ids:
+        ids = _collect_matched_ids_schema_aware(data)
 
-    # Save to session
-    request.session["matched_spotify_ids"] = ids
+    # Dedupe again (just in case) while preserving order
+    seen = set(); ordered_ids = []
+    for tid in ids:
+        if isinstance(tid, str) and len(tid) == 22 and tid not in seen:
+            seen.add(tid); ordered_ids.append(tid)
+
+    # Save & force write
+    request.session["matched_spotify_ids"] = ordered_ids
     request.session["matched_scope"] = scope
     if isinstance(data, dict):
         request.session["matched_summary"] = data.get("summary")
     request.session.modified = True
-    # --------------------------------------------------
+    request.session.save()   # <— ensure it’s persisted for the next request
+    # ----------------------------------------------------
 
-    return JsonResponse(data, safe=False)
+    # (Optional: include a tiny hint back to the UI)
+    return JsonResponse({
+        **(data if isinstance(data, dict) else {"results": data}),
+        "_saved_matched_ids": len(ordered_ids),
+        "_matched_scope": scope,
+    }, safe=False)
 
 # ---------------------------------------------------------------------
 # Simple smoke routes
