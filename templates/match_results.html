@@ -5,14 +5,18 @@
   <title>Matched Results</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+    :root { color-scheme: light dark; }
     body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; }
-    .row { display:flex; gap:1rem; align-items:center; }
-    .btn { padding:0.5rem 0.9rem; border:1px solid #444; border-radius:8px; text-decoration:none; color:#111; }
-    table { border-collapse:collapse; width:100%; margin-top:1rem; }
-    th,td { border:1px solid #ddd; padding:0.5rem; text-align:left; font-size:0.95rem; }
-    th { background:#f5f5f5; position:sticky; top:0; }
+    .row { display:flex; gap:1rem; align-items:center; flex-wrap: wrap; }
+    .btn { padding:0.5rem 0.9rem; border:1px solid #444; border-radius:8px; background:#fff; color:#111; text-decoration:none; cursor:pointer; }
+    .btn[disabled] { opacity:.5; cursor:not-allowed; }
+    .muted { color:#666; }
     .ok { color:#0a7a0a; }
     .warn { color:#b00020; }
+    table { border-collapse:collapse; width:100%; margin-top:1rem; }
+    th,td { border:1px solid #ddd; padding:0.5rem; text-align:left; font-size:0.95rem; }
+    th { background:#f5f5f5; position:sticky; top:0; z-index:1; }
+    .toolbar { display:flex; gap:.5rem; align-items:center; margin:1rem 0; }
   </style>
 </head>
 <body>
@@ -23,25 +27,42 @@
     <p class="ok">✅ Playlist created! <a href="{{ playlist_url }}" target="_blank" rel="noopener">Open in Spotify</a></p>
   {% endif %}
 
-  <div class="row">
+  <div class="row" role="status" aria-live="polite">
     <div><strong>Total:</strong> {{ summary.total|default:results|length }}</div>
-    <div><strong>Matched:</strong> {{ summary.matched|default:0 }} | <strong>Fuzzy:</strong> {{ summary.fuzzy_matched|default:0 }} | <strong>Not found:</strong> {{ summary.not_found|default:0 }}</div>
+    <div>
+      <strong>Matched:</strong> {{ summary.matched|default:0 }}
+      &nbsp;|&nbsp; <strong>Fuzzy:</strong> {{ summary.fuzzy_matched|default:0 }}
+      &nbsp;|&nbsp; <strong>Not found:</strong> {{ summary.not_found|default:0 }}
+    </div>
   </div>
 
-  <div class="row" style="margin:1rem 0;">
-    <a class="btn" href="{% url 'match_report_csv' job_id=job_id %}">Download report (CSV)</a>
-    <!-- Create Playlist → kicks off OAuth. spotify_callback will create the playlist from this job. -->
-    <a class="btn" href="{% url 'spotify_login' %}?job_id={{ job_id }}&next={{ request.path|urlencode }}">Create Spotify Playlist</a>
+  <div class="toolbar">
+    <!-- One-click CSV download; self-disables to prevent repeated downloads -->
+    <button id="csvBtn" class="btn" type="button"
+            data-url="{% url 'match_report_csv' job_id=job_id %}">
+      Download CSV report
+    </button>
+
+    <!-- Create Playlist: prompt for name, then redirect to OAuth with params -->
+    <button id="createBtn" class="btn" type="button"
+            data-login-url="{% url 'spotify_login' %}"
+            data-job="{{ job_id }}"
+            data-next="{{ request.path|urlencode }}"
+            data-default-name="{{ source_name|default:'Imported from Apple Music' }}">
+      Create Spotify Playlist
+    </button>
+
+    <span class="muted">Scroll to review; unmatched are highlighted.</span>
   </div>
 
-  <table>
+  <table aria-label="Match results">
     <tr>
       <th>Status</th><th>Score</th><th>Title</th><th>Artist</th><th>Album</th><th>Spotify ID</th>
     </tr>
     {% for r in results %}
       <tr>
         <td class="{% if r.status != 'not_found' %}ok{% else %}warn{% endif %}">{{ r.status }}</td>
-        <td>{{ r.score }}</td>
+        <td>{{ r.score|default:"" }}</td>
         <td>{{ r.raw_title }}</td>
         <td>{{ r.raw_artist }}</td>
         <td>{{ r.raw_album }}</td>
@@ -49,5 +70,43 @@
       </tr>
     {% endfor %}
   </table>
+
+  <script>
+    // CSV: trigger exactly once per click; optional re-enable after a short delay
+    (function () {
+      const btn = document.getElementById('csvBtn');
+      if (!btn) return;
+      btn.addEventListener('click', () => {
+        if (btn.disabled) return;
+        btn.disabled = true;
+        const url = btn.dataset.url;
+        // Use a hidden anchor to avoid form resubmits or SPA intercepts
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Optional: re-enable after a few seconds if user wants another copy
+        setTimeout(() => { btn.disabled = false; }, 4000);
+      });
+    })();
+
+    // Create playlist: prompt for name, then redirect to Spotify OAuth
+    (function () {
+      const btn = document.getElementById('createBtn');
+      if (!btn) return;
+      btn.addEventListener('click', () => {
+        const def = btn.dataset.defaultName || 'Imported from Apple Music';
+        const name = window.prompt('Name your Spotify playlist:', def);
+        if (!name) return; // user cancelled
+        const base = btn.dataset.loginUrl;
+        const job  = btn.dataset.job;
+        const next = btn.dataset.next;
+        const url = `${base}?job_id=${encodeURIComponent(job)}&next=${encodeURIComponent(next)}&playlist_name=${encodeURIComponent(name)}`;
+        window.location.href = url;
+      });
+    })();
+  </script>
 </body>
 </html>

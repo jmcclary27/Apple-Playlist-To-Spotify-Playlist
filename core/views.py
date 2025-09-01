@@ -128,32 +128,46 @@ def upload_link(request):
 
         url = form.cleaned_data['url']
         try:
-            rows = parse_apple_playlist_from_url(url)  # list[dict]
+            rows = parse_apple_playlist_from_url(url)
         except Exception as e:
             return HttpResponseBadRequest(f"Error: {e}")
 
-        # Save in session for matching job
+        # Save only what we need
         request.session["apple_tracks_all"] = rows
-        request.session["show_match_buttons"] = True
-        request.session["track_count"] = len(rows)
-        # Friendly name (fallback if we can’t parse better)
         request.session["playlist_name"] = url or "Imported from Apple Music"
-        request.session.modified = True
 
+        # One-shot flag so GET will show preview exactly once
+        request.session["just_uploaded"] = True
+
+        # Clear any old match/session artifacts from previous runs
+        for k in ("matched_spotify_ids", "matched_scope", "matched_summary"):
+            request.session.pop(k, None)
+
+        request.session.modified = True
         return redirect("upload")
 
-    # GET
-    uploaded_ok = request.session.pop("show_match_buttons", False)
-    track_count = request.session.pop("track_count", 0)
-    preview = (request.session.get("apple_tracks_all") or [])[:10]
+    # GET — default: no preview, no old counts
+    just_uploaded = request.session.pop("just_uploaded", False)
+
+    preview = []
+    count_total = 0
+    filename = ""
+    show_match_button = False
+
+    if just_uploaded:
+        rows = request.session.get("apple_tracks_all") or []
+        preview = rows[:10]
+        count_total = len(rows)
+        filename = request.session.get("playlist_name", "")
+        show_match_button = True  # show the “Run match” button only after fresh upload
 
     return render(request, 'upload.html', {
         'form': LinkForm(),
-        'preview': preview,
-        'count_total': len(request.session.get("apple_tracks_all") or []),
-        'filename': request.session.get('playlist_name', ''),
-        'uploaded_ok': uploaded_ok,
-        'track_count': track_count,
+        'preview': preview,          # will be [] unless just uploaded
+        'count_total': count_total,  # 0 unless just uploaded
+        'filename': filename,
+        'uploaded_ok': show_match_button,
+        'track_count': count_total,
     })
 
 # ---------------------------------------------------------------------
@@ -262,10 +276,11 @@ def match_results_page(request, job_id: str):
     return render(request, "match_results.html", {
         "request": request,
         "job_id": job_id,
-        "results": results[:1000],  # cap display
+        "results": results[:1000],
         "summary": summary,
         "created": created,
         "playlist_url": playlist_url,
+        "source_name": job.get("source_name") or "Imported from Apple Music",  # ⬅️
     })
 
 @require_GET
@@ -277,6 +292,12 @@ def match_report_csv(request, job_id: str):
     from django.utils.encoding import smart_str
     resp = HttpResponse(content_type="text/csv")
     resp["Content-Disposition"] = f'attachment; filename="match_report_{job_id}.csv"'
+
+    # ⬇️ important: stop repeat downloads and prefetch weirdness
+    resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp["Pragma"] = "no-cache"
+    resp["Expires"] = "0"
+
     w = csv.writer(resp)
     w.writerow(["status","score","raw_title","raw_artist","raw_album","spotify_id","method"])
     for r in (job.get("results") or []):
@@ -297,10 +318,10 @@ def spotify_login(request):
     state = uuid.uuid4().hex
     request.session["spotify_oauth_state"] = state
 
-    # Pass-through info for callback
     job_id = request.GET.get("job_id")
     next_url = request.GET.get("next") or "/"
-    request.session["oauth_ctx"] = {"job_id": job_id, "next": next_url}
+    playlist_name = request.GET.get("playlist_name")  # ⬅️ new
+    request.session["oauth_ctx"] = {"job_id": job_id, "next": next_url, "playlist_name": playlist_name}
     request.session.modified = True
 
     client_id = os.environ.get("SPOTIFY_CLIENT_ID")
@@ -422,6 +443,7 @@ def spotify_callback(request):
     ctx = request.session.pop("oauth_ctx", {}) or {}
     job_id = ctx.get("job_id")
     next_url = ctx.get("next") or "/"
+    chosen_name = ctx.get("playlist_name")  # ⬅️ may be None
 
     if job_id:
         job = _jobs_col().find_one({"_id": job_id})
@@ -429,9 +451,10 @@ def spotify_callback(request):
             return redirect(next_url)
 
         matched_ids = job.get("matched_ids") or _collect_ids_from_results({"results": job.get("results") or []})
-        name = job.get("source_name") or "Imported from Apple Music"
+        # prefer chosen name, else job source name, else fallback
+        name = (chosen_name or job.get("source_name") or "Imported from Apple Music")[:100]
 
-        # 1) Create playlist (private by default)
+        # Create playlist with 'name'
         r = requests.post(
             f"https://api.spotify.com/v1/users/{user_id}/playlists",
             headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},

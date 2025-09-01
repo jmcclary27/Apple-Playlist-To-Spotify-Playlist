@@ -2,12 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Upload & Fetch</title>
+  <title>Apple → Spotify: Upload</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+    :root { color-scheme: light dark; }
     body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; line-height:1.45; }
     form { margin-bottom: 1rem; }
-    button, .btn { padding:0.5rem 0.9rem; border-radius:8px; border:1px solid #444; cursor:pointer; }
+    button, .btn { padding:0.5rem 0.9rem; border-radius:8px; border:1px solid #444; background:#fff; cursor:pointer; }
     .muted { color:#666; }
     table { border-collapse:collapse; width:100%; margin-top:0.5rem; }
     th,td { border:1px solid #ddd; padding:0.5rem; text-align:left; font-size:0.95rem; }
@@ -18,7 +19,7 @@
   <a href="{% url 'landing' %}">← Home</a>
   <h1>Apple → Spotify: Upload</h1>
 
-  <!-- URL Import Form -->
+  <!-- URL Import Form (stateless GET view; preview only shows just after fresh POST) -->
   <form action="{% url 'upload' %}" method="post">
     {% csrf_token %}
     {{ form.as_p }}
@@ -26,26 +27,26 @@
     <span class="muted">Paste an Apple Music playlist URL, then click Fetch.</span>
   </form>
 
-  {% if filename %}
-    <p><strong>Playlist:</strong> {{ filename }}, {{ count_total }} tracks found</p>
-  {% endif %}
-
-  {% if preview %}
-    <h2>Preview (first 10)</h2>
-    <table>
-      <tr><th>Title</th><th>Artist</th><th>Album</th><th>ISRC</th></tr>
-      {% for row in preview %}
-        <tr>
-          <td>{{ row.raw_title }}</td>
-          <td>{{ row.raw_artist }}</td>
-          <td>{{ row.raw_album }}</td>
-          <td>{{ row.raw_isrc }}</td>
-        </tr>
-      {% endfor %}
-    </table>
-  {% endif %}
-
   {% if uploaded_ok %}
+    {% if filename %}
+      <p><strong>Playlist:</strong> {{ filename }}, {{ count_total }} tracks found</p>
+    {% endif %}
+
+    {% if preview %}
+      <h2>Preview (first 10)</h2>
+      <table>
+        <tr><th>Title</th><th>Artist</th><th>Album</th><th>ISRC</th></tr>
+        {% for row in preview %}
+          <tr>
+            <td>{{ row.raw_title }}</td>
+            <td>{{ row.raw_artist }}</td>
+            <td>{{ row.raw_album }}</td>
+            <td>{{ row.raw_isrc }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
     <p><strong>{{ track_count }}</strong> tracks parsed and cached.</p>
 
     <!-- Match button → starts a job, then redirects to progress page -->
@@ -54,20 +55,42 @@
       <button type="submit">Match Playlist</button>
       <span class="muted">You’ll see a progress screen while we match.</span>
     </form>
-
-    <script>
-      document.getElementById('startMatch').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const resp = await fetch("{% url 'match_start' %}", {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: {'X-CSRFToken': document.cookie.split('csrftoken=')[1]?.split(';')[0] || ''},
-        });
-        if (!resp.ok) { alert('Failed to start match'); return; }
-        const data = await resp.json();
-        if (data.job_id) window.location.href = `/match/progress/${data.job_id}`;
-      });
-    </script>
   {% endif %}
+
+  <script>
+    // CSRF helper for fetch POST
+    function getCookie(name) {
+      const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+      return m ? decodeURIComponent(m.pop()) : '';
+    }
+    (function () {
+      const form = document.getElementById('startMatch');
+      if (!form) return;
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const url = form.getAttribute('action');
+        try {
+          const resp = await fetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'X-CSRFToken': getCookie('csrftoken') }
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            alert('Failed to start match: ' + (text || resp.status));
+            return;
+          }
+          const data = await resp.json();
+          if (data && data.job_id) {
+            window.location.href = `/match/progress/${encodeURIComponent(data.job_id)}`;
+          } else {
+            alert('Unexpected response starting match.');
+          }
+        } catch (err) {
+          alert('Network error starting match.');
+        }
+      });
+    })();
+  </script>
 </body>
 </html>
