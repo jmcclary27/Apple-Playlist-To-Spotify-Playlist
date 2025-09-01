@@ -190,6 +190,9 @@ def upload_link(request):
 # ---------------------------------------------------------------------
 # OAuth + playlist creation helpers (your existing code; unchanged)
 # ---------------------------------------------------------------------
+def _json_error(message: str, status=400):
+    return JsonResponse({"error": message}, status=status)
+
 def spotify_login(request):
     state = uuid.uuid4().hex
     request.session["spotify_oauth_state"] = state
@@ -454,32 +457,21 @@ def spotify_callback(request):
 
 @require_POST
 def create_spotify_playlist(request):
-    """
-    Creates a Spotify playlist for the current user and fills it with the
-    most-recent matched Spotify track IDs saved in the session by match_view().
-    Optionally accept a JSON body:
-      { "source_name": "My List", "public": false, "track_ids_in_order": ["..."] }
-    If track_ids_in_order is omitted, we use session 'matched_spotify_ids'.
-    """
-    # Ensure user has logged into Spotify (so we have their user id + refreshable tokens)
     spotify_user_id = request.session.get("spotify_user_id")
     if not spotify_user_id:
-        return HttpResponse(status=401)  # front-end will redirect to /auth/spotify/login
+        return _json_error("Not logged into Spotify", status=401)
 
-    # Inputs
     try:
         payload = json.loads(request.body or "{}")
     except json.JSONDecodeError:
         payload = {}
+
     source_name = payload.get("source_name") or "Imported from Apple Music"
     make_public = bool(payload.get("public", False))
 
-    # Track IDs to use
-    ids = payload.get("track_ids_in_order")
+    ids = payload.get("track_ids_in_order") or request.session.get("matched_spotify_ids") or []
     if not ids:
-        ids = request.session.get("matched_spotify_ids") or []
-    if not ids:
-        return HttpResponseBadRequest("No matched Spotify track IDs found. Run a match first.")
+        return _json_error("No matched Spotify track IDs found. Run a match first.", status=400)
 
     # Dedupe while preserving order
     seen = set()
