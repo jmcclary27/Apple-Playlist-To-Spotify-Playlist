@@ -1,7 +1,8 @@
 import os, io, urllib.parse, base64, datetime, math, json, re
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render, redirect
-from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie, require_POST
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+from django.views.decorators.http import require_POST
 from django.http import HttpResponseBadRequest, JsonResponse
 from services.matching_engine import match_tracks
 from .forms import LinkForm
