@@ -1,14 +1,74 @@
 import os, io, urllib.parse, base64, datetime, math, json, re
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render, redirect
-from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
-from django.http import HttpResponseBadRequest
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie, require_POST
+from django.http import HttpResponseBadRequest, JsonResponse
+from services.matching_engine import match_tracks
 from .forms import LinkForm
 from .parsers import parse_apple_playlist_from_url
 import time
 import uuid
 import requests  # you already import below, ok if duplicated once
 from pymongo import ReturnDocument
+
+# ----- helper: how you fetch the Spotify token -----
+def _get_spotify_token(request):
+    """
+    Replace this with however you're really storing tokens.
+    Common options:
+      - request.session["spotify_access_token"]
+      - request.user.profile.spotify_access_token
+      - a DB table keyed by user id
+    """
+    # Example using session (works well for dev/testing):
+    return request.session.get("spotify_access_token")
+    # If you already saved it on the user, do something like:
+    # return getattr(getattr(request.user, "profile", None), "spotify_access_token", None)
+
+
+# ----- MATCH endpoint -----
+@require_POST
+def match_view(request):
+    """
+    Runs the matching engine on either:
+      - the sample cached in session (default), or
+      - the full list cached in session, or
+      - an explicit list sent in the POST body as JSON (advanced).
+
+    Use query param scope=sample|all to choose session source.
+    """
+    access_token = _get_spotify_token(request)
+    if not access_token:
+        return HttpResponseBadRequest("Missing Spotify access token. Make sure you saved it in session or user profile.")
+
+    # 1) Choose track source
+    scope = request.GET.get("scope", "sample").lower()
+
+    # a) Session-based (recommended path after upload)
+    if scope == "all":
+        apple_tracks = request.session.get("apple_tracks_all") or []
+    else:
+        apple_tracks = request.session.get("apple_tracks_sample") or []
+
+    # b) Optional: allow raw JSON body to override (advanced testing)
+    #    Body example: {"tracks": [{ "Title": "...", "Artist": "...", "ISRC": "...", "Album": "...", "duration_ms": 123000 }, ...]}
+    if not apple_tracks and request.body:
+        try:
+            payload = json.loads(request.body.decode("utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("tracks"), list):
+                apple_tracks = payload["tracks"]
+        except Exception:
+            pass  # fall through; we'll error below if empty
+
+    if not apple_tracks:
+        return HttpResponseBadRequest("No tracks found. Upload first, or POST a JSON body with {'tracks': [...]}.")
+
+    # 2) Run matching
+    data = match_tracks(access_token, apple_tracks, fuzzy_threshold=85)
+
+    # 3) Return JSON (contains summary + per-track results)
+    return JsonResponse(data, safe=False)
+
 
 
 def index(request):

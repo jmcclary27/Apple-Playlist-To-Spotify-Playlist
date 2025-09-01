@@ -19,3 +19,6 @@ pymongo[srv]>=4.6
 # --- Parsing URL links ---
 requests>=2.31
 beautifulsoup4>=4.12
+
+# --- Searching Spotify ---
+rapidfuzz

@@ -33,4 +33,5 @@ urlpatterns = [
     
     path('admin/', admin.site.urls),
     path('upload/', core_views.upload_link, name='upload'),
+    path('match/', core_views.match_view, name='match'),
 ]
