@@ -26,3 +26,43 @@
     {% endfor %}
   </table>
 {% endif %}
+
+{% if uploaded_ok %}
+  <p>{{ track_count }} tracks parsed and cached.</p>
+
+  <button id="btnSample">Run Sample Match</button>
+  <button id="btnAll">Run Full Match</button>
+
+  <pre id="out" style="white-space: pre-wrap; background:#111; padding:1rem; border-radius:8px;"></pre>
+
+  <script>
+    async function postJSON(url) {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'X-CSRFToken': getCookie('csrftoken') }
+      });
+      // show any non-200s as text for debugging
+      if (!resp.ok) {
+        const txt = await resp.text();
+        return { error: resp.status + ' ' + resp.statusText, body: txt };
+      }
+      return resp.json();
+    }
+    function getCookie(name) {
+      const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+      return m ? m.pop() : '';
+    }
+
+    const out = document.getElementById('out');
+    document.getElementById('btnSample').onclick = async () => {
+      out.textContent = "Running sample match…";
+      const data = await postJSON("{% url 'match' %}");
+      out.textContent = JSON.stringify(data, null, 2);
+    };
+    document.getElementById('btnAll').onclick = async () => {
+      out.textContent = "Running full match…";
+      const data = await postJSON("{% url 'match' %}?scope=all");
+      out.textContent = JSON.stringify(data, null, 2);
+    };
+  </script>
+{% endif %}
