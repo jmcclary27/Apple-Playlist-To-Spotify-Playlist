@@ -8,6 +8,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST, require_GET
 from django.conf import settings
 from django.urls import reverse
+from django.views.decorators.cache import never_cache
 import requests
 from bson.objectid import ObjectId
 
@@ -123,50 +124,69 @@ def _normalize_apple_url(raw: str) -> str:
     return raw
 
 @ensure_csrf_cookie
+@never_cache
 def upload_link(request):
     if request.method == 'POST':
         form = LinkForm(request.POST)
         if not form.is_valid():
             request.session["flash_error"] = "Invalid URL. Please paste a full Apple Music playlist link."
-            return redirect(reverse("upload"))
+            # Force a fresh GET; do not render directly (avoid cached response bodies)
+            resp = redirect(reverse("upload"))
+            resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            resp["Pragma"] = "no-cache"
+            resp["Expires"] = "0"
+            return resp
 
-        # Clear any previous playlist so failed parses don't show old data
-        request.session.pop("apple_tracks_all", None)
-        request.session.pop("playlist_name", None)
+        # 🔒 Clear old state BEFORE parse so a failure cannot show the previous playlist.
+        for k in ("apple_tracks_all", "playlist_name", "upload_guard"):
+            request.session.pop(k, None)
 
         raw_url = form.cleaned_data['url']
-        url = _normalize_apple_url(raw_url)
-        request.session["last_uploaded_url_attempt"] = url
+        url = raw_url.strip()
+        # (optional) normalize here if you have a helper, else keep as-is
 
         try:
             rows = parse_apple_playlist_from_url(url)  # list[dict]
         except Exception as e:
             request.session["flash_error"] = f"Error fetching playlist: {e}"
-            return redirect(reverse("upload"))
+            resp = redirect(reverse("upload"))
+            resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            resp["Pragma"] = "no-cache"
+            resp["Expires"] = "0"
+            return resp
 
         if not rows:
             request.session["flash_error"] = "No tracks were found at that URL."
-            return redirect(reverse("upload"))
+            resp = redirect(reverse("upload"))
+            resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            resp["Pragma"] = "no-cache"
+            resp["Expires"] = "0"
+            return resp
 
-        # Save fresh parse for matching
+        # ✅ Save fresh parse only now
         request.session["apple_tracks_all"] = rows
         request.session["playlist_name"] = url or "Imported from Apple Music"
-        request.session["last_uploaded_url"] = url
-        request.session["last_parsed_count"] = len(rows)
 
         # Clear artifacts from prior attempts
         for k in ("matched_spotify_ids", "matched_scope", "matched_summary"):
             request.session.pop(k, None)
 
-        # Guard token so preview only shows for THIS upload
+        # Guard token so the preview only shows for THIS upload
         token = uuid.uuid4().hex
         request.session["upload_guard"] = token
+        request.session["last_uploaded_url"] = url
+        request.session["last_parsed_count"] = len(rows)
         request.session.modified = True
+        request.session.save()  # 💾 force write before redirect
 
-        # Redirect with guard (prevents prefetch/double-GET races)
-        return redirect(f"{reverse('upload')}?uploaded={token}")
+        # Send a cache-busting GET with a unique query param
+        resp = redirect(f"{reverse('upload')}?uploaded={token}")
+        resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp["Pragma"] = "no-cache"
+        resp["Expires"] = "0"
+        return resp
 
-    # GET: always surface any flash error
+    # ---------- GET ----------
     error_msg = request.session.pop("flash_error", None)
 
     token_param = request.GET.get("uploaded")
@@ -180,18 +200,23 @@ def upload_link(request):
         count_total = len(rows)
         filename = request.session.get("playlist_name", "")
 
-    return render(request, 'upload.html', {
+    resp = render(request, 'upload.html', {
         'form': LinkForm(),
-        'error': error_msg,                 # <-- THIS drives your {% if error %} block
-        'uploaded_ok': uploaded_ok,
         'preview': preview,
         'count_total': count_total,
-        'track_count': count_total,
         'filename': filename,
+        'uploaded_ok': uploaded_ok,   # only true immediately after THIS upload
+        'track_count': count_total,
+        'error': error_msg,
         'last_url': request.session.get("last_uploaded_url"),
         'last_count': request.session.get("last_parsed_count"),
     })
-
+    # 🔥 Kill any kind of caching/BFCache/CDN confusion
+    resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0, private"
+    resp["Pragma"] = "no-cache"
+    resp["Expires"] = "0"
+    resp["Vary"] = "Cookie"
+    return resp
 
 # ---------------------------------------------------------------------
 # Matching job flow (single, incremental flow)
@@ -216,82 +241,48 @@ def _collect_ids_from_results(payload) -> list[str]:
     return ids
 
 @require_POST
+@never_cache
 def match_start(request):
-    """
-    Create a job that embeds the current Apple tracks so /match/run
-    never depends on the session. Returns {job_id, total, progress_url}.
-    """
-    # 1) Make sure we actually have a fresh upload
-    rows = request.session.get("apple_tracks_all")
+    rows = request.session.get("apple_tracks_all") or []
     if not isinstance(rows, list) or not rows:
         return JsonResponse({"error": "No uploaded tracks. Please upload first."}, status=400)
 
-    # 2) Preflight: ensure we can talk to Spotify (user token OR app token)
-    if not _get_any_spotify_token(request):
-        return JsonResponse(
-            {"error": "Spotify credentials missing. Set SPOTIFY_CLIENT_ID/SECRET or sign in with Spotify."},
-            status=500,
-        )
-
-    # 3) Shrink each row to essentials (and coerce types)
-    def _s(v):
-        return v if isinstance(v, str) else ("" if v is None else str(v))
-
-    def _shrink(t):
-        if not isinstance(t, dict):
-            return None
-        dur = t.get("duration_sec")
-        dur = int(dur) if isinstance(dur, (int, float)) else None
-        return {
-            "raw_title":   _s(t.get("raw_title")  or t.get("title")),
-            "raw_artist":  _s(t.get("raw_artist") or t.get("artist")),
-            "raw_album":   _s(t.get("raw_album")  or t.get("album")),
-            "raw_isrc":    _s(t.get("raw_isrc")),
-            "duration_sec": dur,
-        }
-
-    apple_tracks = [r for r in (_shrink(t) for t in rows) if r is not None]
-    total = len(apple_tracks)
-    if total == 0:
-        return JsonResponse({"error": "Parsed playlist had no usable rows."}, status=400)
-
-    # 4) Batch size hint (UI can override via ?batch= or POST batch)
-    try:
-        batch = int(request.POST.get("batch") or request.GET.get("batch") or 10)
-    except Exception:
-        batch = 10
-    batch = max(1, min(100, batch))
-
-    # 5) Create the job document
     job_id = uuid4().hex
     now = datetime.datetime.utcnow()
+
+    def _shrink(t):
+        return {
+            "raw_title":  t.get("raw_title")  or t.get("title"),
+            "raw_artist": t.get("raw_artist") or t.get("artist"),
+            "raw_album":  t.get("raw_album")  or t.get("album"),
+            "raw_isrc":   t.get("raw_isrc"),
+            "duration_sec": t.get("duration_sec"),
+        }
+
+    apple_tracks = [_shrink(t) for t in rows]
+    total = len(apple_tracks)
+
     _jobs_col().insert_one({
         "_id": job_id,
-        "schema": 1,
-        "status": "running",                 # running|done
+        "status": "running",
         "created_at": now,
         "updated_at": now,
         "finished_at": None,
-        "apple_tracks": apple_tracks,        # self-contained job
+        "apple_tracks": apple_tracks,
         "total": total,
         "done": 0,
-        "results": [],                       # appended by /match/run
+        "results": [],
         "summary": {"matched": 0, "fuzzy_matched": 0, "not_found": 0},
         "matched_ids": [],
-        "batch_size": batch,                 # default hint for your runner/UI
         "source_name": request.session.get("playlist_name") or "Imported from Apple Music",
-        "source_url": request.session.get("last_uploaded_url"),
     })
 
-    # 6) Return job info (UI can immediately go to progress page)
-    return JsonResponse(
-        {
-            "job_id": job_id,
-            "total": total,
-            "progress_url": reverse("match_progress", args=[job_id]),
-        },
-        status=201,
-    )
+    resp = JsonResponse({"job_id": job_id})
+    resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0, private"
+    resp["Pragma"] = "no-cache"
+    resp["Expires"] = "0"
+    resp["Vary"] = "Cookie"
+    return resp
 
 @require_POST
 def match_run(request, job_id: str):
@@ -390,6 +381,7 @@ def match_run(request, job_id: str):
     })
 
 @require_GET
+@never_cache
 def match_progress_page(request, job_id: str):
     job = _jobs_col().find_one({"_id": job_id})
     total = int(job.get("total", 0)) if job else 0
@@ -399,6 +391,7 @@ def match_progress_page(request, job_id: str):
     return resp
 
 @require_GET
+@never_cache
 def match_results_page(request, job_id: str):
     job = _jobs_col().find_one({"_id": job_id})
     if not job:
