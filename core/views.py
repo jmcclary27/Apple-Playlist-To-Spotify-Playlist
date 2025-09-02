@@ -118,24 +118,28 @@ def upload_link(request):
         except Exception as e:
             return HttpResponseBadRequest(f"Error: {e}")
 
-        # Save only what we need for the next steps
+        # Save only what we need for later steps
         request.session["apple_tracks_all"] = rows
         request.session["playlist_name"] = url or "Imported from Apple Music"
 
         # One-shot flag so GET will show preview exactly once
         request.session["just_uploaded"] = True
 
-        # Clear artifacts from previous runs
+        # Clear any old match/session artifacts from previous runs
         for k in ("matched_spotify_ids", "matched_scope", "matched_summary"):
             request.session.pop(k, None)
 
         request.session.modified = True
         return redirect("upload")
 
-    # GET — default: no preview unless we just uploaded
+    # GET — default: no preview unless just uploaded
     just_uploaded = request.session.pop("just_uploaded", False)
 
-    preview, count_total, filename, show_match_button = [], 0, "", False
+    preview = []
+    count_total = 0
+    filename = ""
+    show_match_button = False
+
     if just_uploaded:
         rows = request.session.get("apple_tracks_all") or []
         preview = rows[:10]
@@ -172,35 +176,26 @@ def _collect_ids_from_results(payload) -> list[str]:
 
 @require_POST
 def match_start(request):
-    """Create a job that embeds the current Apple tracks so /match/run is stateless."""
+    """
+    Create a job that *embeds the original Apple rows* so /match/run
+    sees the exact schema your matcher expects.
+    """
     rows = request.session.get("apple_tracks_all") or []
     if not isinstance(rows, list) or not rows:
         return JsonResponse({"error": "No uploaded tracks. Please upload first."}, status=400)
-
-    def _shrink(t):
-        return {
-            "raw_title":  t.get("raw_title")  or t.get("title"),
-            "raw_artist": t.get("raw_artist") or t.get("artist"),
-            "raw_album":  t.get("raw_album")  or t.get("album"),
-            "raw_isrc":   t.get("raw_isrc"),
-            "duration_sec": t.get("duration_sec"),
-        }
-
-    apple_tracks = [_shrink(t) for t in rows]
-    total = len(apple_tracks)
 
     job_id = uuid4().hex
     now = datetime.datetime.utcnow()
     _jobs_col().insert_one({
         "_id": job_id,
-        "status": "running",
+        "status": "running",              # running|done
         "created_at": now,
         "updated_at": now,
         "finished_at": None,
-        "apple_tracks": apple_tracks,
-        "total": total,
+        "apple_tracks": rows,             # <— keep original rows (no shrink)
+        "total": len(rows),
         "done": 0,
-        "results": [],
+        "results": [],                    # appended in /match/run
         "summary": {"matched": 0, "fuzzy_matched": 0, "not_found": 0},
         "matched_ids": [],
         "source_name": request.session.get("playlist_name") or "Imported from Apple Music",
@@ -220,17 +215,7 @@ def match_run(request, job_id: str):
     done = int(job.get("done") or 0)
     done = max(0, min(done, total))
 
-    # Recovery: if a job is missing tracks, try to pull from session once
-    if (not apple_tracks) and (total <= 0):
-        sess_rows = request.session.get("apple_tracks_all") or []
-        if isinstance(sess_rows, list) and sess_rows:
-            col.update_one({"_id": job_id}, {"$set": {
-                "apple_tracks": sess_rows, "total": len(sess_rows),
-                "updated_at": datetime.datetime.utcnow()
-            }})
-            apple_tracks = sess_rows
-            total = len(sess_rows)
-
+    # Safety: if no tracks, bail
     if not isinstance(apple_tracks, list) or total <= 0:
         return JsonResponse({"error": "Job has no tracks. Please re-upload."}, status=400)
 
@@ -289,7 +274,7 @@ def match_run(request, job_id: str):
     processed = len(slice_tracks)
     new_done = min(total, done + processed)
 
-    # Persist this batch (use $set for done to avoid drift)
+    # Update job
     col.update_one({"_id": job_id}, {
         "$inc": {
             "summary.matched": int(matched_ct),
@@ -396,21 +381,6 @@ def match_report_csv(request, job_id: str):
             r.get("spotify_id"), r.get("method"),
         ])
     return resp
-
-# Optional: quick peek for debugging
-@require_GET
-def match_peek(request, job_id: str):
-    job = _jobs_col().find_one({"_id": job_id}, {"apple_tracks": {"$slice": 1}})
-    if not job:
-        return JsonResponse({"error": "not found"}, status=404)
-    return JsonResponse({
-        "_id": job["_id"],
-        "status": job.get("status"),
-        "total": job.get("total"),
-        "done": job.get("done"),
-        "apple_tracks_type": type(job.get("apple_tracks")).__name__,
-        "apple_tracks_len": len(job.get("apple_tracks") or []),
-    })
 
 # ---------------------------------------------------------------------
 # OAuth + playlist creation (via callback)
