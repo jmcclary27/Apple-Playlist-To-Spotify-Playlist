@@ -2,7 +2,7 @@
 import os, urllib.parse, datetime, json, time, uuid
 from uuid import uuid4
 
-from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST, require_GET
@@ -107,6 +107,7 @@ def _tokens_col():
     return _db().spotify_tokens
 
 def _uploads_col():
+    # holds bulky parsed tracks keyed by a small token
     return _db().uploads
 
 # ---------------------------------------------------------------------
@@ -134,8 +135,7 @@ def upload_link(request):
         for k in ("upload_guard", "playlist_name"):
             request.session.pop(k, None)
 
-        raw_url = form.cleaned_data['url']
-        url = raw_url.strip()
+        url = _normalize_apple_url(form.cleaned_data['url'])
 
         try:
             rows = parse_apple_playlist_from_url(url)  # list[dict]
@@ -204,7 +204,7 @@ def upload_link(request):
         'preview': preview,
         'count_total': count_total,
         'filename': filename,
-        'uploaded_ok': uploaded_ok,
+        'uploaded_ok': uploaded_ok,   # only true immediately after THIS upload
         'track_count': count_total,
         'error': error_msg,
         'last_url': request.session.get("last_uploaded_url"),
@@ -219,7 +219,6 @@ def upload_link(request):
 # ---------------------------------------------------------------------
 # Matching job flow
 # ---------------------------------------------------------------------
-
 def _collect_ids_from_results(payload) -> list[str]:
     ids = []
     if isinstance(payload, dict) and isinstance(payload.get("results"), list):
@@ -234,14 +233,14 @@ def _collect_ids_from_results(payload) -> list[str]:
                     ids.append(tid)
     return ids
 
-# ---- NEW: tolerant field picker and normalizer for parser outputs ----
+# ---- tolerant field picker and normalizer for parser outputs ----
 def _pick(d: dict, *candidates, sep: str | None = None) -> str:
     for k in candidates:
         if k in d and d[k] is not None:
             v = d[k]
             if isinstance(v, list):
                 if sep:
-                    v = sep.join([str(x) for x in v if str(x).strip()])
+                    v = sep.join(str(x).strip() for x in v if str(x).strip())
                 else:
                     v = v[0] if v else ""
             v = str(v).strip()
@@ -250,30 +249,44 @@ def _pick(d: dict, *candidates, sep: str | None = None) -> str:
     return ""
 
 def _shrink_track(t: dict) -> dict:
-    title  = _pick(t, "raw_title", "title", "name", "trackName", "song", "track_title")
-    artist = _pick(t, "raw_artist", "artist", "artists", "artistName", "primaryArtist", "by", sep=", ")
-    album  = _pick(t, "raw_album", "album", "collectionName", "albumName", "release")
-    isrc   = _pick(t, "raw_isrc", "isrc", "ISRC")
+    title   = _pick(t, "raw_title", "title", "name", "trackName", "song", "track_title")
+    artist  = _pick(t, "raw_artist", "artist", "artists", "artistName", "primaryArtist", "by", sep=", ")
+    album   = _pick(t, "raw_album", "album", "collectionName", "albumName", "release")
+    isrc    = _pick(t, "raw_isrc", "isrc", "ISRC")
 
-    dur = t.get("duration_sec")
-    if dur is None:
-        ms = t.get("duration_ms")
-        if isinstance(ms, (int, float)):
-            dur = int(round(ms / 1000.0))
+    dur_sec = t.get("duration_sec")
+    dur_ms  = t.get("duration_ms")
+    if dur_sec is None:
+        if isinstance(dur_ms, (int, float)):
+            dur_sec = int(round(dur_ms / 1000.0))
         else:
             try:
-                # allow string seconds in 'duration'
-                dur = int(str(t.get("duration", "")).strip())
+                dur_sec = int(str(t.get("duration", "")).strip())
             except Exception:
-                dur = None
+                dur_sec = None
 
-    return {
+    # pass normalized fields through if present
+    norm_title  = _pick(t, "norm_title")
+    norm_artist = _pick(t, "norm_artist")
+
+    out = {
         "raw_title": title,
         "raw_artist": artist,
         "raw_album": album,
         "raw_isrc": isrc or None,
-        "duration_sec": dur,
+        "duration_sec": dur_sec,
+        # aliases some matchers expect
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "isrc": isrc or None,
+        "duration_ms": dur_ms,
     }
+    if norm_title:
+        out["norm_title"] = norm_title
+    if norm_artist:
+        out["norm_artist"] = norm_artist
+    return out
 
 @require_POST
 @never_cache
@@ -369,11 +382,6 @@ def match_run(request, job_id: str):
     if not access_token:
         return JsonResponse({"error": "Spotify credentials missing"}, status=400)
 
-    # Optional: quick debug of first outbound query
-    # import logging; t0 = slice_tracks[0]; logging.getLogger(__name__).warning(
-    #     "First query: %r | %r | %r", t0.get("raw_title"), t0.get("raw_artist"), t0.get("raw_album"))
-
-    # Run matching on this slice (keep threshold; tune if needed)
     data = match_tracks(access_token, slice_tracks, fuzzy_threshold=85)
     results = data["results"] if isinstance(data, dict) and isinstance(data.get("results"), list) else (data or [])
 
