@@ -107,7 +107,6 @@ def _tokens_col():
     return _db().spotify_tokens
 
 def _uploads_col():
-    # NEW: holds bulky parsed tracks keyed by a small token
     return _db().uploads
 
 # ---------------------------------------------------------------------
@@ -132,7 +131,6 @@ def upload_link(request):
             resp["Expires"] = "0"
             return resp
 
-        # 🔒 Clear old state BEFORE parse so a failure cannot show the previous playlist.
         for k in ("upload_guard", "playlist_name"):
             request.session.pop(k, None)
 
@@ -157,7 +155,6 @@ def upload_link(request):
             resp["Expires"] = "0"
             return resp
 
-        # ✅ NEW: persist rows server-side; keep session tiny
         token = uuid.uuid4().hex
         playlist_name = url or "Imported from Apple Music"
 
@@ -171,7 +168,6 @@ def upload_link(request):
             upsert=True
         )
 
-        # Tiny session metadata
         for k in ("matched_spotify_ids", "matched_scope", "matched_summary"):
             request.session.pop(k, None)
         request.session["upload_guard"] = token
@@ -208,13 +204,12 @@ def upload_link(request):
         'preview': preview,
         'count_total': count_total,
         'filename': filename,
-        'uploaded_ok': uploaded_ok,   # only true immediately after THIS upload
+        'uploaded_ok': uploaded_ok,
         'track_count': count_total,
         'error': error_msg,
         'last_url': request.session.get("last_uploaded_url"),
         'last_count': request.session.get("last_parsed_count"),
     })
-    # 🔥 Kill any kind of caching/BFCache/CDN confusion
     resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0, private"
     resp["Pragma"] = "no-cache"
     resp["Expires"] = "0"
@@ -222,10 +217,10 @@ def upload_link(request):
     return resp
 
 # ---------------------------------------------------------------------
-# Matching job flow (single, incremental flow)
+# Matching job flow
 # ---------------------------------------------------------------------
+
 def _collect_ids_from_results(payload) -> list[str]:
-    """Extract Spotify track IDs from matcher output, keep matched/fuzzy_matched."""
     ids = []
     if isinstance(payload, dict) and isinstance(payload.get("results"), list):
         seen = set()
@@ -239,10 +234,50 @@ def _collect_ids_from_results(payload) -> list[str]:
                     ids.append(tid)
     return ids
 
+# ---- NEW: tolerant field picker and normalizer for parser outputs ----
+def _pick(d: dict, *candidates, sep: str | None = None) -> str:
+    for k in candidates:
+        if k in d and d[k] is not None:
+            v = d[k]
+            if isinstance(v, list):
+                if sep:
+                    v = sep.join([str(x) for x in v if str(x).strip()])
+                else:
+                    v = v[0] if v else ""
+            v = str(v).strip()
+            if v:
+                return v
+    return ""
+
+def _shrink_track(t: dict) -> dict:
+    title  = _pick(t, "raw_title", "title", "name", "trackName", "song", "track_title")
+    artist = _pick(t, "raw_artist", "artist", "artists", "artistName", "primaryArtist", "by", sep=", ")
+    album  = _pick(t, "raw_album", "album", "collectionName", "albumName", "release")
+    isrc   = _pick(t, "raw_isrc", "isrc", "ISRC")
+
+    dur = t.get("duration_sec")
+    if dur is None:
+        ms = t.get("duration_ms")
+        if isinstance(ms, (int, float)):
+            dur = int(round(ms / 1000.0))
+        else:
+            try:
+                # allow string seconds in 'duration'
+                dur = int(str(t.get("duration", "")).strip())
+            except Exception:
+                dur = None
+
+    return {
+        "raw_title": title,
+        "raw_artist": artist,
+        "raw_album": album,
+        "raw_isrc": isrc or None,
+        "duration_sec": dur,
+    }
+
 @require_POST
 @never_cache
 def match_start(request):
-    # NEW: fetch tracks from uploads store via the guard token
     token = request.session.get("upload_guard")
     doc = _uploads_col().find_one({"_id": token}) if token else None
     rows = (doc or {}).get("rows") or []
@@ -252,17 +287,16 @@ def match_start(request):
     job_id = uuid4().hex
     now = datetime.datetime.utcnow()
 
-    def _shrink(t):
-        return {
-            "raw_title":  t.get("raw_title")  or t.get("title"),
-            "raw_artist": t.get("raw_artist") or t.get("artist"),
-            "raw_album":  t.get("raw_album")  or t.get("album"),
-            "raw_isrc":   t.get("raw_isrc"),
-            "duration_sec": t.get("duration_sec"),
-        }
-
-    apple_tracks = [_shrink(t) for t in rows]
+    apple_tracks = [_shrink_track(t) for t in rows]
     total = len(apple_tracks)
+
+    # sanity: if many tracks are missing core fields, bail early with a clear error
+    missing_core = sum(1 for r in apple_tracks if not r["raw_title"] or not r["raw_artist"])
+    if missing_core > max(2, int(0.5 * total)):
+        return JsonResponse({
+            "error": "Parsed playlist is missing titles or artists (field mismatch). "
+                     "Adjust parser output keys or the _shrink_track() mapping."
+        }, status=400)
 
     _jobs_col().insert_one({
         "_id": job_id,
@@ -310,7 +344,6 @@ def match_run(request, job_id: str):
             }})
         return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
 
-    # Batch sizing (client can pass ?batch=1 for per-song progress)
     try:
         batch = int(request.GET.get("batch", "10"))
     except Exception:
@@ -336,11 +369,14 @@ def match_run(request, job_id: str):
     if not access_token:
         return JsonResponse({"error": "Spotify credentials missing"}, status=400)
 
-    # Run matching on this slice
+    # Optional: quick debug of first outbound query
+    # import logging; t0 = slice_tracks[0]; logging.getLogger(__name__).warning(
+    #     "First query: %r | %r | %r", t0.get("raw_title"), t0.get("raw_artist"), t0.get("raw_album"))
+
+    # Run matching on this slice (keep threshold; tune if needed)
     data = match_tracks(access_token, slice_tracks, fuzzy_threshold=85)
     results = data["results"] if isinstance(data, dict) and isinstance(data.get("results"), list) else (data or [])
 
-    # Tally this batch
     matched_ct = sum(1 for r in results if r.get("status") == "matched")
     fuzzy_ct   = sum(1 for r in results if r.get("status") == "fuzzy_matched")
     not_ct     = sum(1 for r in results if r.get("status") == "not_found")
@@ -354,7 +390,6 @@ def match_run(request, job_id: str):
     processed = len(slice_tracks)
     new_done = min(total, done + processed)
 
-    # Update job doc
     col.update_one({"_id": job_id}, {
         "$inc": {
             "done": processed,
@@ -382,6 +417,9 @@ def match_run(request, job_id: str):
         "processed": processed,
     })
 
+# ---------------------------------------------------------------------
+# Pages
+# ---------------------------------------------------------------------
 @require_GET
 @never_cache
 def match_progress_page(request, job_id: str):
@@ -403,7 +441,6 @@ def match_results_page(request, job_id: str):
     done = int(job.get("done") or 0)
     status = job.get("status") or ("done" if done >= total and total > 0 else "running")
 
-    # If the job isn't finished yet, redirect to progress page
     if status != "done" or done < total:
         return redirect("match_progress", job_id=job_id)
 
@@ -578,7 +615,6 @@ def spotify_callback(request):
     request.session["spotify_user_id"] = user_id
     _save_tokens(user_id, at, tok.get("refresh_token"), tok["expires_in"])
 
-    # Use job context to build playlist and return to results page
     ctx = request.session.pop("oauth_ctx", {}) or {}
     job_id = ctx.get("job_id")
     next_url = ctx.get("next") or "/"
@@ -592,7 +628,6 @@ def spotify_callback(request):
         matched_ids = job.get("matched_ids") or _collect_ids_from_results({"results": job.get("results") or []})
         name = (chosen_name or job.get("source_name") or "Imported from Apple Music")[:100]
 
-        # Create playlist
         r = requests.post(
             f"https://api.spotify.com/v1/users/{user_id}/playlists",
             headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
@@ -604,7 +639,6 @@ def spotify_callback(request):
         playlist_id = playlist["id"]
         playlist_url = playlist.get("external_urls", {}).get("spotify", "")
 
-        # Add tracks in chunks
         if matched_ids:
             add_url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
             headers = {"Authorization": f"Bearer {at}", "Content-Type": "application/json"}
@@ -616,7 +650,6 @@ def spotify_callback(request):
                     rr = requests.post(add_url, headers=headers, json={"uris": [f"spotify:track:{tid}" for tid in chunk]}, timeout=25)
                 rr.raise_for_status()
 
-        # Persist conversion record
         _conversions_col().insert_one({
             "created_at": datetime.datetime.utcnow(),
             "spotify_user_id": user_id,
@@ -632,7 +665,6 @@ def spotify_callback(request):
         sep = "&" if "?" in next_url else "?"
         return redirect(f"{next_url}{sep}created=1&playlist_url={urllib.parse.quote(playlist_url)}")
 
-    # No job context → simple fallback
     return redirect("/me")
 
 # ---------------------------------------------------------------------
