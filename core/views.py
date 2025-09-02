@@ -19,27 +19,7 @@ from .parsers import parse_apple_playlist_from_url
 # Small helpers
 # ---------------------------------------------------------------------
 # --- Helper: normalize Apple Music URLs ---
-def _normalize_apple_url(raw: str) -> str:
-    """
-    Best-effort sanitizer for Apple Music playlist URLs:
-    - ensure https scheme
-    - coerce geo hosts to music.apple.com
-    - strip query params and fragments
-    """
-    if not raw:
-        return raw
-    try:
-        from urllib.parse import urlsplit, urlunsplit
-        s = urlsplit(raw if "://" in raw else f"https://{raw}")
-        host = s.netloc.lower()
-        # unify common Apple hosts
-        if host in ("geo.itunes.apple.com", "itunes.apple.com", "geo.music.apple.com"):
-            host = "music.apple.com"
-        # keep path only; drop query/fragment
-        return urlunsplit(("https", host, s.path.rstrip("/"), "", ""))
-    except Exception:
-        # on any parse issue, just return the original; parser can still try
-        return raw
+
 
 # ---------------------------------------------------------------------
 # Debug: environment / session status
@@ -70,9 +50,6 @@ def landing(request):
 # Spotify token helpers
 # ---------------------------------------------------------------------
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
-
-def _uploads_col():
-    return _db().uploads
 
 def _get_user_token_from_session(request):
     token = request.session.get("spotify_access_token")
@@ -137,16 +114,23 @@ def _tokens_col():
 # ---------------------------------------------------------------------
 # Upload page  ✅ robust, guarded preview, no stale state
 # ---------------------------------------------------------------------
+import uuid
+
+def _normalize_apple_url(raw: str) -> str:
+    raw = (raw or "").strip()
+    if raw and not raw.lower().startswith(("http://", "https://")):
+        raw = "https://" + raw
+    return raw
+
 @ensure_csrf_cookie
 def upload_link(request):
     if request.method == 'POST':
         form = LinkForm(request.POST)
         if not form.is_valid():
-            # Show error on page instead of a blank 400
             request.session["flash_error"] = "Invalid URL. Please paste a full Apple Music playlist link."
             return redirect(reverse("upload"))
 
-        # 🚿 Clear old tracks BEFORE parsing so a failure never shows a previous playlist
+        # Clear any previous playlist so failed parses don't show old data
         request.session.pop("apple_tracks_all", None)
         request.session.pop("playlist_name", None)
 
@@ -164,57 +148,50 @@ def upload_link(request):
             request.session["flash_error"] = "No tracks were found at that URL."
             return redirect(reverse("upload"))
 
-        # ✅ Save fresh parse for the *next* steps
+        # Save fresh parse for matching
         request.session["apple_tracks_all"] = rows
         request.session["playlist_name"] = url or "Imported from Apple Music"
         request.session["last_uploaded_url"] = url
         request.session["last_parsed_count"] = len(rows)
 
-        # 🧹 Clear artifacts from prior attempts
+        # Clear artifacts from prior attempts
         for k in ("matched_spotify_ids", "matched_scope", "matched_summary"):
             request.session.pop(k, None)
 
-        # 🔐 One-time guard so preview shows only for *this* upload
+        # Guard token so preview only shows for THIS upload
         token = uuid.uuid4().hex
         request.session["upload_guard"] = token
         request.session.modified = True
 
-        # Redirect with guard in query (avoids prefetch/double-GET races)
+        # Redirect with guard (prevents prefetch/double-GET races)
         return redirect(f"{reverse('upload')}?uploaded={token}")
 
-    # ---------- GET ----------
+    # GET: always surface any flash error
     error_msg = request.session.pop("flash_error", None)
 
     token_param = request.GET.get("uploaded")
     guard_ok = token_param and (token_param == request.session.get("upload_guard"))
-
     uploaded_ok = bool(guard_ok and request.session.get("apple_tracks_all"))
-    preview, count_total, filename = [], 0, ""
 
+    preview, count_total, filename = [], 0, ""
     if uploaded_ok:
         rows = request.session.get("apple_tracks_all") or []
         preview = rows[:10]
         count_total = len(rows)
         filename = request.session.get("playlist_name", "")
-        # 🔓 Invalidate the guard after first render so refreshes won't keep showing the preview
-        request.session.pop("upload_guard", None)
-        request.session.modified = True
 
-    resp = render(request, 'upload.html', {
+    return render(request, 'upload.html', {
         'form': LinkForm(),
+        'error': error_msg,                 # <-- THIS drives your {% if error %} block
+        'uploaded_ok': uploaded_ok,
         'preview': preview,
         'count_total': count_total,
-        'filename': filename,
-        'uploaded_ok': uploaded_ok,   # only true immediately after THIS successful upload
         'track_count': count_total,
-        'error': error_msg,
+        'filename': filename,
         'last_url': request.session.get("last_uploaded_url"),
         'last_count': request.session.get("last_parsed_count"),
     })
-    # 🛑 prevent stale caching of the upload/preview page
-    resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    resp["Pragma"] = "no-cache"
-    return resp
+
 
 # ---------------------------------------------------------------------
 # Matching job flow (single, incremental flow)
