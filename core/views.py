@@ -316,6 +316,102 @@ def match_start(request):
         status=201,
     )
 
+@require_POST
+def match_run(request, job_id: str):
+    col = _jobs_col()
+    job = col.find_one({"_id": job_id})
+    if not job:
+        return JsonResponse({"error": "Job not found"}, status=404)
+
+    apple_tracks = job.get("apple_tracks") or []
+    total = int(job.get("total") or (len(apple_tracks) if isinstance(apple_tracks, list) else 0))
+    done = int(job.get("done") or 0)
+    done = max(0, min(done, total))
+
+    if not isinstance(apple_tracks, list) or total <= 0:
+        return JsonResponse({"error": "Job has no tracks. Please re-upload."}, status=400)
+
+    if done >= total:
+        if job.get("status") != "done":
+            col.update_one({"_id": job_id}, {"$set": {
+                "status": "done",
+                "finished_at": datetime.datetime.utcnow(),
+                "updated_at": datetime.datetime.utcnow()
+            }})
+        return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
+
+    # Batch sizing (client can pass ?batch=1 for per-song progress)
+    try:
+        batch = int(request.GET.get("batch", "10"))
+    except Exception:
+        batch = 10
+    batch = max(1, min(batch, 100))
+
+    remaining = total - done
+    take = min(batch, remaining)
+    start = done
+    stop = start + take
+    slice_tracks = apple_tracks[start:stop]
+
+    if not slice_tracks:
+        col.update_one({"_id": job_id}, {"$set": {
+            "status": "done",
+            "done": total,
+            "finished_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow()
+        }})
+        return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
+
+    access_token = _get_any_spotify_token(request)
+    if not access_token:
+        return JsonResponse({"error": "Spotify credentials missing"}, status=400)
+
+    # Run matching on this slice
+    data = match_tracks(access_token, slice_tracks, fuzzy_threshold=85)
+    results = data["results"] if isinstance(data, dict) and isinstance(data.get("results"), list) else (data or [])
+
+    # Tally this batch
+    matched_ct = sum(1 for r in results if r.get("status") == "matched")
+    fuzzy_ct   = sum(1 for r in results if r.get("status") == "fuzzy_matched")
+    not_ct     = sum(1 for r in results if r.get("status") == "not_found")
+
+    ids_this = []
+    for r in results:
+        tid = r.get("spotify_id")
+        if isinstance(tid, str) and len(tid) == 22:
+            ids_this.append(tid)
+
+    processed = len(slice_tracks)
+    new_done = min(total, done + processed)
+
+    # Update job doc
+    col.update_one({"_id": job_id}, {
+        "$inc": {
+            "done": processed,
+            "summary.matched": matched_ct,
+            "summary.fuzzy_matched": fuzzy_ct,
+            "summary.not_found": not_ct,
+        },
+        "$push": {"results": {"$each": results}},
+        "$addToSet": {"matched_ids": {"$each": ids_this}},
+        "$set": {"status": ("done" if new_done >= total else "running"),
+                 "updated_at": datetime.datetime.utcnow()},
+    })
+
+    if new_done >= total:
+        col.update_one({"_id": job_id}, {"$set": {
+            "status": "done",
+            "finished_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow()
+        }})
+
+    return JsonResponse({
+        "done": new_done,
+        "total": total,
+        "status": "done" if new_done >= total else "running",
+        "processed": processed,  # use this to animate per-song progress
+    })
+
 @require_GET
 def match_progress_page(request, job_id: str):
     job = _jobs_col().find_one({"_id": job_id})
