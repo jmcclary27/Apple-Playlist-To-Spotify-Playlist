@@ -1,186 +1,174 @@
-# parsers.py
 import re
 import json
 import time
 import html
-import unicodedata
 import urllib.parse
+from typing import List, Dict, Any
+
 import requests
 from bs4 import BeautifulSoup
 
-# -------------------------
-# URL recognition
-# -------------------------
+# --- URL validation ---------------------------------------------------
 APPLE_PLAYLIST_RE = re.compile(r'^https?://(music|geo)\.apple\.com/[^/]+/playlist/')
 
 def is_apple_playlist_url(url: str) -> bool:
     return bool(APPLE_PLAYLIST_RE.match((url or "").strip().lower()))
 
-def normalize_apple_url(url: str) -> str:
-    """Keep as-is, but strip spaces/fragments; Apple is picky about storefront."""
-    if not url:
-        return url
-    url = url.strip()
-    # Remove fragment to avoid weird anchors that sometimes hide content
-    parts = urllib.parse.urlsplit(url)
-    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, parts.query, ""))
+# --- HTTP helpers (bounded) -------------------------------------------
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
 
-# -------------------------
-# HTTP fetch (no-cache)
-# -------------------------
-def _http_get(url: str, timeout=15) -> str:
-    # Bust caches (CDN/proxy) with a timestamp query param
-    sep = "&" if "?" in url else "?"
-    url = f"{url}{sep}_ts={int(time.time()*1000)}"
-    headers = {
-        # Pretend to be a normal real browser
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-    }
-    r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
-    r.raise_for_status()
-    return r.text
+def _with_cache_buster(url: str) -> str:
+    # append ts to force fresh HTML
+    u = urllib.parse.urlsplit(url)
+    q = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
+    q.append(("_ts", str(int(time.time()))))
+    nq = urllib.parse.urlencode(q)
+    return urllib.parse.urlunsplit((u.scheme, u.netloc, u.path, nq, u.fragment))
 
-# -------------------------
-# Extraction helpers
-# -------------------------
-def _extract_song_urls_from_playlist_html(html_text: str):
-    """Strategy A: OG tags <meta property='music:song' content='...'>"""
-    soup = BeautifulSoup(html_text, 'html.parser')
-    metas = soup.find_all('meta', {"property": "music:song"})
-    urls = [m.get("content") for m in metas if m.get("content")]
-    return urls
+def _http_get_html(url: str, timeout=8, retries=1) -> str:
+    session = requests.Session()
+    session.headers.update(_DEFAULT_HEADERS)
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            resp = session.get(_with_cache_buster(url), timeout=timeout, allow_redirects=True)
+            # Some geolocated pages 302 to "geo.apple.com" — allow that.
+            resp.raise_for_status()
+            return resp.text
+        except Exception as e:
+            last_err = e
+            time.sleep(0.25)
+    raise RuntimeError(f"Failed to fetch Apple playlist page: {last_err}")
 
-def _extract_ids_from_urls(urls):
-    out = []
-    seen = set()
-    for u in urls or []:
-        tid = _extract_track_id_from_song_url(u)
-        if tid and tid not in seen:
-            seen.add(tid)
-            out.append(tid)
-    return out
+# --- Extraction strategies --------------------------------------------
+_SONG_META_SELECTOR = {"property": "music:song"}           # old pages
+_JSONLD_SELECTOR    = {"type": "application/ld+json"}      # newer pages
 
-def _extract_track_id_from_song_url(url: str):
-    """Pull the ?i= track id; else try last numeric path segment."""
-    if not url:
-        return None
-    # Handle &amp; in HTML
-    url = html.unescape(url)
+# Fallback for anchor URLs that contain '/song/' and a numeric id
+_ANCHOR_SONG_RE = re.compile(r'/song/[^/]+/id(\d+)')
+_QS_ID_PARAM    = "i"  # many links are ...?i=<trackId>
+
+def _extract_ids_from_jsonld(soup: BeautifulSoup) -> List[str]:
+    ids: List[str] = []
+    for tag in soup.find_all("script", _JSONLD_SELECTOR):
+        try:
+            payload = json.loads(tag.string or tag.text or "{}")
+        except Exception:
+            continue
+        # Accept either an array of ItemList or a single object
+        candidates = payload if isinstance(payload, list) else [payload]
+        for obj in candidates:
+            # 1) schema.org ItemList
+            items = obj.get("itemListElement") if isinstance(obj, dict) else None
+            if isinstance(items, list):
+                for it in items:
+                    url = None
+                    # "url" directly or inside "item"
+                    if isinstance(it, dict):
+                        url = it.get("url") or (it.get("item") or {}).get("url")
+                    if isinstance(url, str):
+                        tid = _track_id_from_url(url)
+                        if tid:
+                            ids.append(tid)
+            # 2) sometimes tracks array lives under "track"/"tracks"
+            for key in ("track", "tracks"):
+                arr = obj.get(key)
+                if isinstance(arr, list):
+                    for t in arr:
+                        url = None
+                        if isinstance(t, dict):
+                            url = t.get("url")
+                        if isinstance(url, str):
+                            tid = _track_id_from_url(url)
+                            if tid:
+                                ids.append(tid)
+    return _dedup(ids)
+
+def _extract_ids_from_meta(soup: BeautifulSoup) -> List[str]:
+    urls = [m.get("content") for m in soup.find_all("meta", _SONG_META_SELECTOR) if m.get("content")]
+    ids = [tid for u in urls if (tid := _track_id_from_url(u))]
+    return _dedup(ids)
+
+def _extract_ids_from_anchors(soup: BeautifulSoup) -> List[str]:
+    ids: List[str] = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "/song/" not in href:
+            continue
+        tid = _track_id_from_url(href)
+        if tid:
+            ids.append(tid)
+    return _dedup(ids)
+
+def _track_id_from_url(url: str) -> str | None:
+    # Try query param ?i=<id>
     q = urllib.parse.urlparse(url).query
     params = urllib.parse.parse_qs(q)
-    if 'i' in params and params['i']:
-        return params['i'][0]
-    # fallback: last numeric path segment
+    if _QS_ID_PARAM in params and params[_QS_ID_PARAM]:
+        val = params[_QS_ID_PARAM][0]
+        if val.isdigit():
+            return val
+    # Try /song/.../id<digits>
+    m = _ANCHOR_SONG_RE.search(url)
+    if m:
+        return m.group(1)
+    # Try last numeric segment
     parts = [p for p in urllib.parse.urlparse(url).path.split('/') if p]
     if parts and parts[-1].isdigit():
         return parts[-1]
     return None
 
-def _extract_song_ids_from_jsonld(html_text: str):
-    """Strategy B: JSON-LD blocks that describe the playlist and tracks."""
-    ids = []
+def _dedup(seq: List[str]) -> List[str]:
     seen = set()
-    soup = BeautifulSoup(html_text, 'html.parser')
-    for node in soup.find_all("script", {"type": "application/ld+json"}):
-        try:
-            data = json.loads(node.string or node.text or "{}")
-        except Exception:
-            continue
-        # Some pages have an array of JSON-LD docs
-        docs = data if isinstance(data, list) else [data]
-        for doc in docs:
-            # MusicPlaylist with 'track' list
-            track_list = []
-            if isinstance(doc, dict):
-                if doc.get("@type") in ("MusicPlaylist", "Playlist"):
-                    t = doc.get("track")
-                    if isinstance(t, list):
-                        track_list.extend(t)
-                # Sometimes Apple nests itemListElement / ListItem with urls
-                if isinstance(doc.get("itemListElement"), list):
-                    for li in doc["itemListElement"]:
-                        url = None
-                        if isinstance(li, dict):
-                            if "url" in li and isinstance(li["url"], str):
-                                url = li["url"]
-                            elif "item" in li and isinstance(li["item"], dict):
-                                url = li["item"].get("url")
-                        if url:
-                            tid = _extract_track_id_from_song_url(url)
-                            if tid and tid not in seen:
-                                seen.add(tid); ids.append(tid)
-                # Parse 'track' entries with 'url' fields
-                for t in track_list:
-                    if isinstance(t, dict):
-                        url = t.get("url") or t.get("@id")
-                        if isinstance(url, str):
-                            tid = _extract_track_id_from_song_url(url)
-                            if tid and tid not in seen:
-                                seen.add(tid); ids.append(tid)
-    return ids
+    out: List[str] = []
+    for x in seq:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
 
-def _extract_song_ids_by_regex(html_text: str):
-    """Strategy C: Regex sweep through raw HTML (lots of Apple variants)."""
-    ids = []
-    seen = set()
-
-    # ?i=123456 or &amp;i=123456
-    for m in re.finditer(r'(?:[?&]|&amp;)i=(\d{4,})', html_text):
-        tid = m.group(1)
-        if tid not in seen:
-            seen.add(tid); ids.append(tid)
-
-    # "songId":123456  OR  "trackId":"123456"
-    for m in re.finditer(r'(?:"songId"|"trackId")\s*:\s*"?(\d{4,})"?', html_text):
-        tid = m.group(1)
-        if tid not in seen:
-            seen.add(tid); ids.append(tid)
-
-    # Occasionally Apple serializes ids as {"id":"123456","type":"songs"}
-    for m in re.finditer(r'"id"\s*:\s*"(\d{4,})"\s*,\s*"type"\s*:\s*"songs"', html_text):
-        tid = m.group(1)
-        if tid not in seen:
-            seen.add(tid); ids.append(tid)
-
-    return ids
-
-# -------------------------
-# iTunes lookup (chunked)
-# -------------------------
-def _lookup_tracks_itunes_chunked(ids, chunk_size=50, timeout=12):
+# --- iTunes lookup (bounded + chunked) -------------------------------
+def _lookup_tracks_itunes(ids: List[str], timeout=6) -> Dict[str, Dict[str, Any]]:
     """
-    Lookup many track IDs using iTunes Lookup API in chunks to avoid
-    URL-too-long and partial result issues.
+    Apple iTunes lookup API supports multiple IDs; we chunk to 50
+    and tolerate partial failures (never hangs).
     """
-    out = {}
-    ids = [str(x) for x in ids or []]
+    out: Dict[str, Dict[str, Any]] = {}
     if not ids:
         return out
 
-    base = "https://itunes.apple.com/lookup"
-    for i in range(0, len(ids), chunk_size):
-        chunk = ids[i:i+chunk_size]
-        params = {"id": ",".join(chunk)}
+    session = requests.Session()
+    session.headers.update({"User-Agent": _DEFAULT_HEADERS["User-Agent"]})
+
+    CHUNK = 50
+    for i in range(0, len(ids), CHUNK):
+        chunk = ids[i:i+CHUNK]
+        url = "https://itunes.apple.com/lookup?id=" + ",".join(chunk)
         try:
-            r = requests.get(base, params=params, timeout=timeout)
+            r = session.get(url, timeout=timeout)
             r.raise_for_status()
             data = r.json()
+            for item in data.get("results", []):
+                tid = str(item.get("trackId") or "")
+                if tid:
+                    out[tid] = item
         except Exception:
+            # tolerate a failing chunk; continue with what we have
             continue
-        for item in data.get("results", []):
-            tid = str(item.get("trackId") or "")
-            if tid:
-                out[tid] = item
     return out
 
-# -------------------------
-# Normalizers
-# -------------------------
+# --- Normalization (same interface as before) ------------------------
+import unicodedata
+
 PARENS_RE      = re.compile(r"\s*[\(\[][^)\]]*[\)\]]\s*")
 SUFFIXES_RE    = re.compile(
     r"\s*-\s*(?:remaster(?:ed)?(?:\s*\d{2,4})?|live|mono|stereo|single version|radio edit|deluxe|explicit)\b.*",
@@ -225,63 +213,48 @@ def normalize_artist(artist: str) -> str:
     a = WHITESPACE_RE.sub(" ", a).strip()
     return a
 
-# -------------------------
-# Public API
-# -------------------------
+# --- Public API -------------------------------------------------------
 def parse_apple_playlist_from_url(url: str):
     """
-    Return rows of tracks:
-      {
-        'raw_title', 'raw_artist', 'raw_album', 'raw_isrc',
-        'norm_title', 'norm_artist'
-      }
-    Uses multiple extraction strategies to survive Apple markup variance.
+    Returns list[dict] with keys:
+      raw_title, raw_artist, raw_album, raw_isrc, norm_title, norm_artist
+    Raises ValueError on an obviously bad URL, RuntimeError on fetch/parse issues.
     """
     if not is_apple_playlist_url(url):
         raise ValueError("That doesn't look like an Apple Music playlist link.")
 
-    url = normalize_apple_url(url)
-    html_text = _http_get(url)
+    html_text = _http_get_html(url, timeout=8, retries=1)
+    soup = BeautifulSoup(html_text, "html.parser")
 
-    # Try A) OG meta
-    song_urls = _extract_song_urls_from_playlist_html(html_text)
-    ids = _extract_ids_from_urls(song_urls)
-
-    # Try B) JSON-LD
+    # Priority 1: JSON-LD
+    ids = _extract_ids_from_jsonld(soup)
+    # Priority 2: meta tags
     if not ids:
-        ids = _extract_song_ids_from_jsonld(html_text)
-
-    # Try C) Regex sweep
+        ids = _extract_ids_from_meta(soup)
+    # Priority 3: anchors
     if not ids:
-        ids = _extract_song_ids_by_regex(html_text)
+        ids = _extract_ids_from_anchors(soup)
 
-    # Still nothing? Surface a clear error back to the UI.
     if not ids:
-        # Let the caller show this in 'flash_error'
-        raise ValueError("No track IDs found on that Apple Music page. "
-                         "The playlist may be private, empty, or Apple changed the markup.")
+        # Give caller a clear message; your view turns this into a flash error
+        raise RuntimeError("Couldn’t find any song IDs on that page.")
 
-    # iTunes metadata (chunked)
-    itunes_map = _lookup_tracks_itunes_chunked(ids)
+    itunes_map = _lookup_tracks_itunes(ids)
 
     rows = []
-    seen = set()
     for tid in ids:
-        if tid in seen:
-            continue
-        seen.add(tid)
         meta = itunes_map.get(tid, {})
-        title = meta.get('trackName', '')
-        artist = meta.get('artistName', '')
-        album = meta.get('collectionName', '')
-        isrc = meta.get('isrc', '')
+        title  = meta.get("trackName", "")
+        artist = meta.get("artistName", "")
+        album  = meta.get("collectionName", "")
+        isrc   = meta.get("isrc", "")
 
         rows.append({
-            'raw_title': title,
-            'raw_artist': artist,
-            'raw_album': album,
-            'raw_isrc': isrc,
-            'norm_title': normalize_title(title),
-            'norm_artist': normalize_artist(artist),
+            "raw_title": title,
+            "raw_artist": artist,
+            "raw_album": album,
+            "raw_isrc": isrc,
+            "norm_title": normalize_title(title),
+            "norm_artist": normalize_artist(artist),
         })
     return rows
