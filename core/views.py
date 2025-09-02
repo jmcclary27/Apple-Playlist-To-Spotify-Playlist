@@ -18,21 +18,28 @@ from .parsers import parse_apple_playlist_from_url
 # ---------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------
+# --- Helper: normalize Apple Music URLs ---
 def _normalize_apple_url(raw: str) -> str:
-    """Canonicalize Apple Music playlist URLs to avoid parser/cache surprises."""
-    if not isinstance(raw, str):
-        return ""
-    url = raw.strip()
-    # Unify host, drop query/fragment
-    url = url.replace("https://embed.music.apple.com", "https://music.apple.com")
-    url = url.replace("http://embed.music.apple.com", "https://music.apple.com")
-    url = url.replace("http://music.apple.com", "https://music.apple.com")
+    """
+    Best-effort sanitizer for Apple Music playlist URLs:
+    - ensure https scheme
+    - coerce geo hosts to music.apple.com
+    - strip query params and fragments
+    """
+    if not raw:
+        return raw
     try:
-        parts = urllib.parse.urlsplit(url)
-        url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+        from urllib.parse import urlsplit, urlunsplit
+        s = urlsplit(raw if "://" in raw else f"https://{raw}")
+        host = s.netloc.lower()
+        # unify common Apple hosts
+        if host in ("geo.itunes.apple.com", "itunes.apple.com", "geo.music.apple.com"):
+            host = "music.apple.com"
+        # keep path only; drop query/fragment
+        return urlunsplit(("https", host, s.path.rstrip("/"), "", ""))
     except Exception:
-        pass
-    return url
+        # on any parse issue, just return the original; parser can still try
+        return raw
 
 # ---------------------------------------------------------------------
 # Debug: environment / session status
@@ -63,6 +70,9 @@ def landing(request):
 # Spotify token helpers
 # ---------------------------------------------------------------------
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+
+def _uploads_col():
+    return _db().uploads
 
 def _get_user_token_from_session(request):
     token = request.session.get("spotify_access_token")
@@ -132,10 +142,11 @@ def upload_link(request):
     if request.method == 'POST':
         form = LinkForm(request.POST)
         if not form.is_valid():
+            # Show error on page instead of a blank 400
             request.session["flash_error"] = "Invalid URL. Please paste a full Apple Music playlist link."
             return redirect(reverse("upload"))
 
-        # Clear old tracks BEFORE parsing so failure never shows a previous playlist
+        # 🚿 Clear old tracks BEFORE parsing so a failure never shows a previous playlist
         request.session.pop("apple_tracks_all", None)
         request.session.pop("playlist_name", None)
 
@@ -153,17 +164,17 @@ def upload_link(request):
             request.session["flash_error"] = "No tracks were found at that URL."
             return redirect(reverse("upload"))
 
-        # Save fresh parse
+        # ✅ Save fresh parse for the *next* steps
         request.session["apple_tracks_all"] = rows
         request.session["playlist_name"] = url or "Imported from Apple Music"
         request.session["last_uploaded_url"] = url
         request.session["last_parsed_count"] = len(rows)
 
-        # Clear artifacts from prior attempts
+        # 🧹 Clear artifacts from prior attempts
         for k in ("matched_spotify_ids", "matched_scope", "matched_summary"):
             request.session.pop(k, None)
 
-        # Guard so preview shows only for THIS upload
+        # 🔐 One-time guard so preview shows only for *this* upload
         token = uuid.uuid4().hex
         request.session["upload_guard"] = token
         request.session.modified = True
@@ -171,8 +182,9 @@ def upload_link(request):
         # Redirect with guard in query (avoids prefetch/double-GET races)
         return redirect(f"{reverse('upload')}?uploaded={token}")
 
-    # GET
+    # ---------- GET ----------
     error_msg = request.session.pop("flash_error", None)
+
     token_param = request.GET.get("uploaded")
     guard_ok = token_param and (token_param == request.session.get("upload_guard"))
 
@@ -184,8 +196,11 @@ def upload_link(request):
         preview = rows[:10]
         count_total = len(rows)
         filename = request.session.get("playlist_name", "")
+        # 🔓 Invalidate the guard after first render so refreshes won't keep showing the preview
+        request.session.pop("upload_guard", None)
+        request.session.modified = True
 
-    return render(request, 'upload.html', {
+    resp = render(request, 'upload.html', {
         'form': LinkForm(),
         'preview': preview,
         'count_total': count_total,
@@ -196,6 +211,10 @@ def upload_link(request):
         'last_url': request.session.get("last_uploaded_url"),
         'last_count': request.session.get("last_parsed_count"),
     })
+    # 🛑 prevent stale caching of the upload/preview page
+    resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp["Pragma"] = "no-cache"
+    return resp
 
 # ---------------------------------------------------------------------
 # Matching job flow (single, incremental flow)
@@ -221,136 +240,81 @@ def _collect_ids_from_results(payload) -> list[str]:
 
 @require_POST
 def match_start(request):
-    rows = request.session.get("apple_tracks_all") or []
+    """
+    Create a job that embeds the current Apple tracks so /match/run
+    never depends on the session. Returns {job_id, total, progress_url}.
+    """
+    # 1) Make sure we actually have a fresh upload
+    rows = request.session.get("apple_tracks_all")
     if not isinstance(rows, list) or not rows:
         return JsonResponse({"error": "No uploaded tracks. Please upload first."}, status=400)
 
-    job_id = uuid4().hex
-    now = datetime.datetime.utcnow()
+    # 2) Preflight: ensure we can talk to Spotify (user token OR app token)
+    if not _get_any_spotify_token(request):
+        return JsonResponse(
+            {"error": "Spotify credentials missing. Set SPOTIFY_CLIENT_ID/SECRET or sign in with Spotify."},
+            status=500,
+        )
+
+    # 3) Shrink each row to essentials (and coerce types)
+    def _s(v):
+        return v if isinstance(v, str) else ("" if v is None else str(v))
 
     def _shrink(t):
+        if not isinstance(t, dict):
+            return None
+        dur = t.get("duration_sec")
+        dur = int(dur) if isinstance(dur, (int, float)) else None
         return {
-            "raw_title":  t.get("raw_title")  or t.get("title"),
-            "raw_artist": t.get("raw_artist") or t.get("artist"),
-            "raw_album":  t.get("raw_album")  or t.get("album"),
-            "raw_isrc":   t.get("raw_isrc"),
-            "duration_sec": t.get("duration_sec"),
+            "raw_title":   _s(t.get("raw_title")  or t.get("title")),
+            "raw_artist":  _s(t.get("raw_artist") or t.get("artist")),
+            "raw_album":   _s(t.get("raw_album")  or t.get("album")),
+            "raw_isrc":    _s(t.get("raw_isrc")),
+            "duration_sec": dur,
         }
 
-    apple_tracks = [_shrink(t) for t in rows]
+    apple_tracks = [r for r in (_shrink(t) for t in rows) if r is not None]
     total = len(apple_tracks)
+    if total == 0:
+        return JsonResponse({"error": "Parsed playlist had no usable rows."}, status=400)
 
+    # 4) Batch size hint (UI can override via ?batch= or POST batch)
+    try:
+        batch = int(request.POST.get("batch") or request.GET.get("batch") or 10)
+    except Exception:
+        batch = 10
+    batch = max(1, min(100, batch))
+
+    # 5) Create the job document
+    job_id = uuid4().hex
+    now = datetime.datetime.utcnow()
     _jobs_col().insert_one({
         "_id": job_id,
-        "status": "running",
+        "schema": 1,
+        "status": "running",                 # running|done
         "created_at": now,
         "updated_at": now,
         "finished_at": None,
-        "apple_tracks": apple_tracks,
+        "apple_tracks": apple_tracks,        # self-contained job
         "total": total,
         "done": 0,
-        "results": [],
+        "results": [],                       # appended by /match/run
         "summary": {"matched": 0, "fuzzy_matched": 0, "not_found": 0},
         "matched_ids": [],
+        "batch_size": batch,                 # default hint for your runner/UI
         "source_name": request.session.get("playlist_name") or "Imported from Apple Music",
+        "source_url": request.session.get("last_uploaded_url"),
     })
-    return JsonResponse({"job_id": job_id})
 
-@require_POST
-def match_run(request, job_id: str):
-    col = _jobs_col()
-    job = col.find_one({"_id": job_id})
-    if not job:
-        return JsonResponse({"error": "Job not found"}, status=404)
-
-    apple_tracks = job.get("apple_tracks") or []
-    total = int(job.get("total") or (len(apple_tracks) if isinstance(apple_tracks, list) else 0))
-    done = int(job.get("done") or 0)
-    done = max(0, min(done, total))
-
-    if not isinstance(apple_tracks, list) or total <= 0:
-        return JsonResponse({"error": "Job has no tracks. Please re-upload."}, status=400)
-
-    if done >= total:
-        if job.get("status") != "done":
-            col.update_one({"_id": job_id}, {"$set": {
-                "status": "done",
-                "finished_at": datetime.datetime.utcnow(),
-                "updated_at": datetime.datetime.utcnow()
-            }})
-        return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
-
-    # Batch sizing (client can pass ?batch=1 for per-song progress)
-    try:
-        batch = int(request.GET.get("batch", "10"))
-    except Exception:
-        batch = 10
-    batch = max(1, min(batch, 100))
-
-    remaining = total - done
-    take = min(batch, remaining)
-    start = done
-    stop = start + take
-    slice_tracks = apple_tracks[start:stop]
-
-    if not slice_tracks:
-        col.update_one({"_id": job_id}, {"$set": {
-            "status": "done",
-            "done": total,
-            "finished_at": datetime.datetime.utcnow(),
-            "updated_at": datetime.datetime.utcnow()
-        }})
-        return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
-
-    access_token = _get_any_spotify_token(request)
-    if not access_token:
-        return JsonResponse({"error": "Spotify credentials missing"}, status=400)
-
-    # Run matching on this slice
-    data = match_tracks(access_token, slice_tracks, fuzzy_threshold=85)
-    results = data["results"] if isinstance(data, dict) and isinstance(data.get("results"), list) else (data or [])
-
-    # Tally this batch
-    matched_ct = sum(1 for r in results if r.get("status") == "matched")
-    fuzzy_ct   = sum(1 for r in results if r.get("status") == "fuzzy_matched")
-    not_ct     = sum(1 for r in results if r.get("status") == "not_found")
-
-    ids_this = []
-    for r in results:
-        tid = r.get("spotify_id")
-        if isinstance(tid, str) and len(tid) == 22:
-            ids_this.append(tid)
-
-    processed = len(slice_tracks)
-    new_done = min(total, done + processed)
-
-    # Update job doc
-    col.update_one({"_id": job_id}, {
-        "$inc": {
-            "done": processed,
-            "summary.matched": matched_ct,
-            "summary.fuzzy_matched": fuzzy_ct,
-            "summary.not_found": not_ct,
+    # 6) Return job info (UI can immediately go to progress page)
+    return JsonResponse(
+        {
+            "job_id": job_id,
+            "total": total,
+            "progress_url": reverse("match_progress", args=[job_id]),
         },
-        "$push": {"results": {"$each": results}},
-        "$addToSet": {"matched_ids": {"$each": ids_this}},
-        "$set": {"status": ("done" if new_done >= total else "running"),
-                 "updated_at": datetime.datetime.utcnow()},
-    })
-
-    if new_done >= total:
-        col.update_one({"_id": job_id}, {"$set": {
-            "status": "done",
-            "finished_at": datetime.datetime.utcnow(),
-            "updated_at": datetime.datetime.utcnow()
-        }})
-
-    return JsonResponse({
-        "done": new_done,
-        "total": total,
-        "status": "done" if new_done >= total else "running",
-        "processed": processed,  # use this to animate per-song progress
-    })
+        status=201,
+    )
 
 @require_GET
 def match_progress_page(request, job_id: str):
