@@ -1,5 +1,5 @@
 # core/views.py
-import os, urllib.parse, datetime, json, re, time, uuid
+import os, urllib.parse, datetime, json, time, uuid
 from uuid import uuid4
 
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
@@ -7,13 +7,32 @@ from django.shortcuts import render, redirect
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST, require_GET
 from django.conf import settings
-from django.urls import reverse  # ⬅️ NEW
+from django.urls import reverse
 import requests
 from bson.objectid import ObjectId
 
 from services.matching_engine import match_tracks
 from .forms import LinkForm
 from .parsers import parse_apple_playlist_from_url
+
+# ---------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------
+def _normalize_apple_url(raw: str) -> str:
+    """Canonicalize Apple Music playlist URLs to avoid parser/cache surprises."""
+    if not isinstance(raw, str):
+        return ""
+    url = raw.strip()
+    # Unify host, drop query/fragment
+    url = url.replace("https://embed.music.apple.com", "https://music.apple.com")
+    url = url.replace("http://embed.music.apple.com", "https://music.apple.com")
+    url = url.replace("http://music.apple.com", "https://music.apple.com")
+    try:
+        parts = urllib.parse.urlsplit(url)
+        url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    except Exception:
+        pass
+    return url
 
 # ---------------------------------------------------------------------
 # Debug: environment / session status
@@ -30,6 +49,8 @@ def debug_status(request):
         "app_token_expires_in": (request.session.get("spotify_app_expires_at") or 0) - int(time.time()),
         "allowed_hosts": settings.ALLOWED_HOSTS,
         "csrf_trusted_origins": getattr(settings, "CSRF_TRUSTED_ORIGINS", []),
+        "last_uploaded_url": request.session.get("last_uploaded_url"),
+        "last_parsed_count": request.session.get("last_parsed_count"),
     })
 
 # ---------------------------------------------------------------------
@@ -104,18 +125,24 @@ def _tokens_col():
     return _db().spotify_tokens
 
 # ---------------------------------------------------------------------
-# Upload page  ✅ robust, no “pop” race; shows errors inline
+# Upload page  ✅ robust, guarded preview, no stale state
 # ---------------------------------------------------------------------
 @ensure_csrf_cookie
 def upload_link(request):
     if request.method == 'POST':
         form = LinkForm(request.POST)
         if not form.is_valid():
-            # show error on page instead of a 400 blank
             request.session["flash_error"] = "Invalid URL. Please paste a full Apple Music playlist link."
             return redirect(reverse("upload"))
 
-        url = form.cleaned_data['url']
+        # Clear old tracks BEFORE parsing so failure never shows a previous playlist
+        request.session.pop("apple_tracks_all", None)
+        request.session.pop("playlist_name", None)
+
+        raw_url = form.cleaned_data['url']
+        url = _normalize_apple_url(raw_url)
+        request.session["last_uploaded_url_attempt"] = url
+
         try:
             rows = parse_apple_playlist_from_url(url)  # list[dict]
         except Exception as e:
@@ -126,26 +153,31 @@ def upload_link(request):
             request.session["flash_error"] = "No tracks were found at that URL."
             return redirect(reverse("upload"))
 
-        # Save for matching
+        # Save fresh parse
         request.session["apple_tracks_all"] = rows
         request.session["playlist_name"] = url or "Imported from Apple Music"
+        request.session["last_uploaded_url"] = url
+        request.session["last_parsed_count"] = len(rows)
 
         # Clear artifacts from prior attempts
         for k in ("matched_spotify_ids", "matched_scope", "matched_summary"):
             request.session.pop(k, None)
 
+        # Guard so preview shows only for THIS upload
+        token = uuid.uuid4().hex
+        request.session["upload_guard"] = token
         request.session.modified = True
 
-        # Use query param rather than a session pop flag (avoids prefetch race)
-        return redirect(f"{reverse('upload')}?uploaded=1")
+        # Redirect with guard in query (avoids prefetch/double-GET races)
+        return redirect(f"{reverse('upload')}?uploaded={token}")
 
     # GET
     error_msg = request.session.pop("flash_error", None)
+    token_param = request.GET.get("uploaded")
+    guard_ok = token_param and (token_param == request.session.get("upload_guard"))
 
-    uploaded_ok = (request.GET.get("uploaded") == "1") and bool(request.session.get("apple_tracks_all"))
-    preview = []
-    count_total = 0
-    filename = ""
+    uploaded_ok = bool(guard_ok and request.session.get("apple_tracks_all"))
+    preview, count_total, filename = [], 0, ""
 
     if uploaded_ok:
         rows = request.session.get("apple_tracks_all") or []
@@ -158,15 +190,22 @@ def upload_link(request):
         'preview': preview,
         'count_total': count_total,
         'filename': filename,
-        'uploaded_ok': uploaded_ok,   # only true immediately after successful upload
+        'uploaded_ok': uploaded_ok,   # only true immediately after THIS successful upload
         'track_count': count_total,
-        'error': error_msg,           # displayed by template if present
+        'error': error_msg,
+        'last_url': request.session.get("last_uploaded_url"),
+        'last_count': request.session.get("last_parsed_count"),
     })
 
 # ---------------------------------------------------------------------
 # Matching job flow (single, incremental flow)
+#   /api/match/start          -> create job embedding tracks
+#   /api/match/run/<job_id>   -> process next batch + update progress
+#   /match/progress/<job_id>  -> page that loops POST /api/match/run
+#   /match/results/<job_id>   -> final results view
 # ---------------------------------------------------------------------
 def _collect_ids_from_results(payload) -> list[str]:
+    """Extract Spotify track IDs from matcher output, keep matched/fuzzy_matched."""
     ids = []
     if isinstance(payload, dict) and isinstance(payload.get("results"), list):
         seen = set()
@@ -241,6 +280,7 @@ def match_run(request, job_id: str):
             }})
         return JsonResponse({"done": total, "total": total, "status": "done", "processed": 0})
 
+    # Batch sizing (client can pass ?batch=1 for per-song progress)
     try:
         batch = int(request.GET.get("batch", "10"))
     except Exception:
@@ -266,9 +306,11 @@ def match_run(request, job_id: str):
     if not access_token:
         return JsonResponse({"error": "Spotify credentials missing"}, status=400)
 
+    # Run matching on this slice
     data = match_tracks(access_token, slice_tracks, fuzzy_threshold=85)
     results = data["results"] if isinstance(data, dict) and isinstance(data.get("results"), list) else (data or [])
 
+    # Tally this batch
     matched_ct = sum(1 for r in results if r.get("status") == "matched")
     fuzzy_ct   = sum(1 for r in results if r.get("status") == "fuzzy_matched")
     not_ct     = sum(1 for r in results if r.get("status") == "not_found")
@@ -282,6 +324,7 @@ def match_run(request, job_id: str):
     processed = len(slice_tracks)
     new_done = min(total, done + processed)
 
+    # Update job doc
     col.update_one({"_id": job_id}, {
         "$inc": {
             "done": processed,
@@ -306,7 +349,7 @@ def match_run(request, job_id: str):
         "done": new_done,
         "total": total,
         "status": "done" if new_done >= total else "running",
-        "processed": processed,
+        "processed": processed,  # use this to animate per-song progress
     })
 
 @require_GET
@@ -328,6 +371,7 @@ def match_results_page(request, job_id: str):
     done = int(job.get("done") or 0)
     status = job.get("status") or ("done" if done >= total and total > 0 else "running")
 
+    # If the job isn't finished yet, redirect to progress page
     if status != "done" or done < total:
         return redirect("match_progress", job_id=job_id)
 
@@ -357,6 +401,7 @@ def match_report_csv(request, job_id: str):
     from django.utils.encoding import smart_str
     resp = HttpResponse(content_type="text/csv")
     resp["Content-Disposition"] = f'attachment; filename="match_report_{job_id}.csv"'
+    # prevent repeat downloads / prefetch
     resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp["Pragma"] = "no-cache"
     resp["Expires"] = "0"
@@ -502,6 +547,7 @@ def spotify_callback(request):
     request.session["spotify_user_id"] = user_id
     _save_tokens(user_id, at, tok.get("refresh_token"), tok["expires_in"])
 
+    # Use job context to build playlist and return to results page
     ctx = request.session.pop("oauth_ctx", {}) or {}
     job_id = ctx.get("job_id")
     next_url = ctx.get("next") or "/"
@@ -515,6 +561,7 @@ def spotify_callback(request):
         matched_ids = job.get("matched_ids") or _collect_ids_from_results({"results": job.get("results") or []})
         name = (chosen_name or job.get("source_name") or "Imported from Apple Music")[:100]
 
+        # Create playlist
         r = requests.post(
             f"https://api.spotify.com/v1/users/{user_id}/playlists",
             headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
@@ -526,6 +573,7 @@ def spotify_callback(request):
         playlist_id = playlist["id"]
         playlist_url = playlist.get("external_urls", {}).get("spotify", "")
 
+        # Add tracks in chunks
         if matched_ids:
             add_url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
             headers = {"Authorization": f"Bearer {at}", "Content-Type": "application/json"}
@@ -537,6 +585,7 @@ def spotify_callback(request):
                     rr = requests.post(add_url, headers=headers, json={"uris": [f"spotify:track:{tid}" for tid in chunk]}, timeout=25)
                 rr.raise_for_status()
 
+        # Persist conversion record
         _conversions_col().insert_one({
             "created_at": datetime.datetime.utcnow(),
             "spotify_user_id": user_id,
@@ -552,6 +601,7 @@ def spotify_callback(request):
         sep = "&" if "?" in next_url else "?"
         return redirect(f"{next_url}{sep}created=1&playlist_url={urllib.parse.quote(playlist_url)}")
 
+    # No job context → simple fallback
     return redirect("/me")
 
 # ---------------------------------------------------------------------
