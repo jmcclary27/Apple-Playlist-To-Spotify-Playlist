@@ -28,6 +28,12 @@
     <span class="muted">Paste an Apple Music playlist URL, then click Fetch.</span>
   </form>
 
+  {% if error %}
+    <div style="background:#fee; color:#900; border:1px solid #f99; padding:.75rem; border-radius:.5rem; margin:.5rem 0;">
+      {{ error }}
+    </div>
+  {% endif %}
+
   {% if uploaded_ok %}
     {% if filename %}
       <p><strong>Playlist:</strong> {{ filename }}, {{ count_total }} tracks found</p>
