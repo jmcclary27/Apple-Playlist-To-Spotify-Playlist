@@ -110,6 +110,32 @@ def _uploads_col():
     # holds bulky parsed tracks keyed by a small token
     return _db().uploads
 
+# views.py
+from django.shortcuts import render, redirect
+from django.core.mail import send_mail
+from .models import SpotifyAccessRequest
+
+def request_access(request):
+    if request.method == "POST":
+        ar = SpotifyAccessRequest.objects.create(
+            email=request.POST["email"].strip(),
+            username=request.POST.get("username","").strip(),
+            org=request.POST.get("org","").strip(),
+            notes=request.POST.get("notes","").strip(),
+        )
+        # TODO: send yourself a notification with a link to /admin/access-requests/
+        return render(request, "thanks_pending.html")
+    return render(request, "request_access.html")
+
+def can_connect(email: str) -> bool:
+    # after you approve in dashboard, flip approved=True in your admin
+    return SpotifyAccessRequest.objects.filter(email=email, approved=True).exists()
+
+def connect_spotify_entry(request):
+    user_email = request.user.email if request.user.is_authenticated else None
+    if not user_email or not can_connect(user_email):
+        return redirect("request_access")
+
 # ---------------------------------------------------------------------
 # Upload page  ✅ robust, guarded preview, no stale state
 # ---------------------------------------------------------------------
