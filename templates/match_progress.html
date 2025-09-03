@@ -50,16 +50,16 @@
     }
     a.home-link:hover{background:rgba(30,30,30,.6);border-color:#3a3a3a;}
 
-    /* Center content, shifted up slightly to make room for facts box */
+    /* Center content sits just above the facts panel */
     .center-stack{
-      transform: translateY(-6vh);
       width:min(780px,92vw);
+      margin-bottom:12px; /* small, tidy gap above facts panel */
     }
     @media (max-width:560px){
-      .center-stack{ transform: translateY(-3vh); width:min(96vw, 560px); }
+      .center-stack{ width:min(96vw,560px); margin-bottom:10px; }
     }
 
-    h1{margin:0 0 1.4rem; font-size:clamp(1.3rem,4vw,2rem);}
+    h1{margin:0 0 1.2rem; font-size:clamp(1.3rem,4vw,2rem);}
 
     .bar-wrap{
       width:100%;
@@ -82,18 +82,18 @@
     .muted{color:var(--muted)}
     .error{color:#f88; margin-top:1rem}
 
-    /* Facts panel */
+    /* Facts panel (outer box) — fixed height set via JS to fit longest fact */
     .facts{
       width:min(860px,92vw);
       background:var(--panel);
       border:1px solid var(--border);
       border-radius:16px;
       padding:1rem 1.2rem;
-      margin-top:20px;
       box-shadow:0 0 30px rgba(0,0,0,.7);
       backdrop-filter: blur(3px);
       -webkit-backdrop-filter: blur(3px);
       text-align:left;
+      overflow:hidden; /* keep height stable */
     }
     .facts h2{
       margin:.2rem 0 .6rem;
@@ -102,27 +102,27 @@
       color:#eaeaea;
       opacity:.9;
     }
+
+    /* Inner fact box may vary in intrinsic height, but outer facts panel remains fixed */
     .fact-box{
       border:1px solid #333;
       background:#0f0f0f;
       border-radius:12px;
       padding:1rem 1.1rem;
-      min-height:64px;
       display:flex;
       align-items:center;
       line-height:1.55;
       color:#ddd;
-      position:relative;
     }
 
-    /* Fade-in animation for fact text */
+    /* Smoother fade (slightly longer, no vertical shift = less jitter) */
     @keyframes factFade {
-      from { opacity:0; transform: translateY(6px); }
-      to   { opacity:1; transform: translateY(0); }
+      from { opacity:0; }
+      to   { opacity:1; }
     }
     .fact-text{
       font-size: clamp(.98rem, 2.4vw, 1.05rem);
-      animation: factFade .55s ease-out;
+      animation: factFade .7s ease-out;
     }
   </style>
 </head>
@@ -145,7 +145,7 @@
   </div>
 
   <!-- Facts panel -->
-  <section class="facts" aria-live="polite" aria-atomic="true">
+  <section id="factsPanel" class="facts" aria-live="polite" aria-atomic="true">
     <h2>Did you know?</h2>
     <div class="fact-box">
       <div id="factText" class="fact-text">Loading a cool music fact…</div>
@@ -275,18 +275,53 @@
     ];
 
     (function factsRotator(){
+      const factsPanel = document.getElementById("factsPanel");
+      const factBox = factsPanel.querySelector(".fact-box");
       const el = document.getElementById("factText");
-      const INTERVAL_MS = 5000;
+      const INTERVAL_MS = 7000; // 7 seconds
+
       let lastIndex = -1;
+      let timer;
 
       function pickIndex(){
         if (MUSIC_FACTS.length <= 1) return 0;
         let i = Math.floor(Math.random() * MUSIC_FACTS.length);
-        if (i === lastIndex) {
-          i = (i + 1) % MUSIC_FACTS.length; // avoid immediate repeats
-        }
+        if (i === lastIndex) i = (i + 1) % MUSIC_FACTS.length; // avoid immediate repeats
         lastIndex = i;
         return i;
+      }
+
+      // Measure the tallest fact and fix the OUTER facts panel height accordingly
+      function lockFactsPanelHeight(){
+        // create a hidden measuring clone with same width & styles
+        const clone = factsPanel.cloneNode(true);
+        clone.style.position = "absolute";
+        clone.style.visibility = "hidden";
+        clone.style.pointerEvents = "none";
+        clone.style.left = "-9999px";
+        clone.style.height = "auto";
+        document.body.appendChild(clone);
+
+        const cBox = clone.querySelector(".fact-box");
+        const cText = clone.querySelector(".fact-text");
+
+        let maxBoxH = 0;
+        for (const f of MUSIC_FACTS){
+          cText.textContent = f;
+          // Force layout width the same as real box to measure wrapping
+          cBox.style.width = factBox.clientWidth + "px";
+          cBox.style.height = "auto";
+          const h = cBox.offsetHeight;
+          if (h > maxBoxH) maxBoxH = h;
+        }
+
+        // Real panel height: header + paddings + tallest fact box
+        const styles = getComputedStyle(factsPanel);
+        const padY = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
+        const headerH = factsPanel.querySelector("h2").offsetHeight;
+        factsPanel.style.height = (headerH + padY + maxBoxH) + "px";
+
+        document.body.removeChild(clone);
       }
 
       function showFact() {
@@ -295,12 +330,25 @@
         // Force reflow
         void el.offsetWidth;
         el.textContent = MUSIC_FACTS[pickIndex()];
-        el.style.animation = "factFade .55s ease-out";
+        el.style.animation = "factFade .7s ease-out";
       }
 
-      // initial paint
+      function onResizeDebounced(){
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          lockFactsPanelHeight();
+        }, 100);
+      }
+
+      // initial paint & lock
       showFact();
+      // lock after first render (ensure widths are known)
+      requestAnimationFrame(lockFactsPanelHeight);
+
+      // rotate
       setInterval(showFact, INTERVAL_MS);
+      // recompute on resize
+      window.addEventListener("resize", onResizeDebounced, { passive:true });
     })();
   </script>
 
