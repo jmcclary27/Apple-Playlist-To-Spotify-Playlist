@@ -4,24 +4,89 @@
   <meta charset="utf-8" />
   <title>Matching…</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="light only">
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <style>
-    html, body { background:#fff; color:#111; }
-    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; }
-    .bar-wrap { width:100%; max-width:640px; height:16px; background:#eee; border-radius:999px; overflow:hidden; border:1px solid #ddd; }
-    .bar { height:100%; width:0%; background:#0a7a0a; transition: width .18s ease; }
-    .row { display:flex; align-items:center; gap:1rem; margin-top:.75rem; }
-    .muted { color:#666; }
-    .error { color:#b00020; margin-top: 1rem; }
+    :root {
+      --bg:#000;
+      --panel:rgba(20,20,20,0.9);
+      --border:#2b2b2b;
+      --text:#fff;
+      --muted:#bdbdbd;
+      --accent:#1db954;
+      --accent-2:#1ed760;
+    }
+    *{box-sizing:border-box;}
+    html,body{height:100%;}
+    body{
+      margin:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      color:var(--text);
+      background:var(--bg);
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:center;
+      text-align:center;
+    }
+
+    #bg{
+      position:fixed;
+      inset:0;
+      width:100vw;
+      height:100vh;
+      z-index:-2;
+      background:
+        radial-gradient(1100px 700px at 70% 15%, rgba(28,28,28,0.55), transparent 60%),
+        radial-gradient(900px 600px at 20% 85%, rgba(22,22,22,0.6), transparent 65%),
+        #000;
+    }
+
+    a.home-link{
+      position:absolute;
+      top:20px;
+      left:20px;
+      text-decoration:none;
+      color:var(--muted);
+      font-weight:600;
+      border:1px solid var(--border);
+      padding:.5rem .8rem;
+      border-radius:10px;
+      backdrop-filter:blur(2px);
+      transition:background .15s ease,border-color .15s ease;
+    }
+    a.home-link:hover{background:rgba(30,30,30,.6);border-color:#3a3a3a;}
+
+    h1{margin-bottom:2rem;font-size:clamp(1.4rem,4vw,2rem);}
+
+    .bar-wrap{
+      width:min(700px,90%);
+      height:28px;
+      background:#111;
+      border-radius:999px;
+      overflow:hidden;
+      border:1px solid var(--border);
+      margin-bottom:1rem;
+    }
+    .bar{
+      height:100%;
+      width:0%;
+      background:var(--accent);
+      transition:width .18s ease;
+    }
+
+    .row{display:flex;justify-content:center;align-items:center;gap:1rem;margin-bottom:1rem;}
+    .muted{color:var(--muted);}
+    .error{color:#f88;margin-top:1rem;}
   </style>
 </head>
 <body data-job-id="{{ job_id }}" data-total="{{ total|default:0 }}">
-  <a href="{% url 'landing' %}">← Home</a>
+  <canvas id="bg" aria-hidden="true"></canvas>
+
+  <a href="{% url 'landing' %}" class="home-link">← Home</a>
   <h1>Matching your playlist…</h1>
 
-  <div class="bar-wrap" aria-hidden="true"><div id="bar" class="bar"></div></div>
+  <div class="bar-wrap"><div id="bar" class="bar"></div></div>
   <div class="row">
     <div id="pct"><strong>0%</strong></div>
     <div class="muted" id="counts">0 / {{ total|default:"?" }}</div>
@@ -29,12 +94,129 @@
   <p class="muted">Please keep this tab open while we match tracks.</p>
   <div id="err" class="error" role="alert" style="display:none;"></div>
 
+  <!-- Starfield background script -->
+  <script>
+    // ====== Starfield + connecting lines (lightweight) ======
+    (function () {
+      const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const canvas = document.getElementById('bg');
+      const ctx = canvas.getContext('2d');
+
+      let w, h, dpr, particles, running = !prefersReduced;
+      const MAX_PARTICLES = 120;
+      const LINK_DIST = 110;
+      const SPEED = 0.08;
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        w = canvas.width = Math.floor(window.innerWidth * dpr);
+        h = canvas.height = Math.floor(window.innerHeight * dpr);
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        initParticles();
+      }
+
+      function initParticles() {
+        const count = Math.min(MAX_PARTICLES, Math.round((window.innerWidth * window.innerHeight) / 14000));
+        particles = [];
+        for (let i = 0; i < count; i++) {
+          particles.push({
+            x: Math.random() * w,
+            y: Math.random() * h,
+            vx: (Math.random() * 2 - 1) * SPEED * dpr,
+            vy: (Math.random() * 2 - 1) * SPEED * dpr,
+            r: (Math.random() * 1.6 + 0.6) * dpr,
+            twinkle: Math.random() * Math.PI * 2
+          });
+        }
+      }
+
+      let last = performance.now();
+      function frame(now) {
+        if (!running) return;
+        const dt = Math.min(now - last, 50);
+        last = now;
+
+        ctx.clearRect(0, 0, w, h);
+
+        // Draw links
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < particles.length; i++) {
+          const a = particles[i];
+          for (let j = i + 1; j < particles.length; j++) {
+            const b = particles[j];
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < LINK_DIST * dpr) {
+              const alpha = 0.08 * (1 - dist / (LINK_DIST * dpr));
+              ctx.strokeStyle = `rgba(180, 180, 180, ${alpha})`;
+              ctx.lineWidth = dpr * 0.6;
+              ctx.beginPath();
+              ctx.moveTo(a.x, a.y);
+              ctx.lineTo(b.x, b.y);
+              ctx.stroke();
+            }
+          }
+        }
+        ctx.restore();
+
+        // Draw stars
+        for (const p of particles) {
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+
+          if (p.x < -20) p.x = w + 20;
+          if (p.x > w + 20) p.x = -20;
+          if (p.y < -20) p.y = h + 20;
+          if (p.y > h + 20) p.y = -20;
+
+          p.twinkle += dt * 0.003;
+          const glow = 0.2 + Math.sin(p.twinkle) * 0.4;
+
+          const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 4);
+          grad.addColorStop(0, `rgba(255,255,255,${0.6 * glow})`);
+          grad.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * 4, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = `rgba(255,255,255,${0.95 * glow})`;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        requestAnimationFrame(frame);
+      }
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          running = false;
+        } else if (!prefersReduced) {
+          running = true;
+          last = performance.now();
+          requestAnimationFrame(frame);
+        }
+      });
+
+      window.addEventListener('resize', resize, { passive: true });
+      resize();
+
+      if (!prefersReduced) {
+        requestAnimationFrame(frame);
+      }
+    })();
+  </script>
+
+  <!-- Progress bar logic (unchanged) -->
   <script>
     function getCookie(name) {
       const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
       return m ? decodeURIComponent(m.pop()) : '';
     }
-
     (function () {
       const jobId = document.body.dataset.jobId || '';
       let totalCount = Number(document.body.dataset.total || '0') || 0;
@@ -44,10 +226,9 @@
       const counts = document.getElementById('counts');
       const err = document.getElementById('err');
 
-      // Local notion of "done" so we can animate per-song
       let localDone = 0;
       const BATCH_SIZE = 10;
-      const MAX_POLLS = 2000;  // safety
+      const MAX_POLLS = 2000;
       let polls = 0;
 
       function paint(done, total) {
@@ -62,14 +243,11 @@
         if (n <= 0) { after(); return; }
         localDone += 1;
         paint(localDone, total);
-        // small delay per song for smoothness
         setTimeout(() => animateSongs(n - 1, total, after), 90);
       }
 
       async function step() {
-        if (++polls > MAX_POLLS) {
-          throw new Error('Too many polling attempts — aborting.');
-        }
+        if (++polls > MAX_POLLS) throw new Error('Too many polling attempts — aborting.');
         const url = `/match/run/${encodeURIComponent(jobId)}?batch=${BATCH_SIZE}`;
         const resp = await fetch(url, {
           method: 'POST',
@@ -77,32 +255,25 @@
           headers: { 'X-CSRFToken': getCookie('csrftoken') }
         });
 
-        if (!resp.ok) {
-          const txt = await resp.text();
-          throw new Error(txt || ('HTTP ' + resp.status));
-        }
+        if (!resp.ok) throw new Error(await resp.text() || ('HTTP ' + resp.status));
 
         const data = await resp.json();
         const serverDone = Number(data.done || 0);
         const processed = Number(data.processed || 0);
 
-        // Server's total is authoritative once seen
         if ((data.total || 0) > 0) totalCount = Number(data.total);
         const total = totalCount > 0 ? totalCount : (Number(data.total || 0) || 1);
 
-        // Ensure localDone catches up if needed (e.g., first response)
         if (localDone < serverDone - processed) {
           localDone = serverDone - processed;
           paint(localDone, total);
         }
 
-        // Animate one tick per processed song, then continue polling
         animateSongs(processed, total, () => {
           if (data.status === 'done' && total > 0 && serverDone >= total) {
             window.location.href = `/match/results/${encodeURIComponent(jobId)}?created=0`;
             return;
           }
-          // Slight pause so the browser paints between polls
           setTimeout(step, 120);
         });
       }
@@ -113,9 +284,7 @@
         return;
       }
 
-      // Initialize display
       paint(0, totalCount);
-
       step().catch((e) => {
         console.error(e);
         err.textContent = 'Matching failed: ' + (e.message || 'Unknown error');
