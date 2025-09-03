@@ -5,11 +5,298 @@
   <title>Apple → Spotify</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; display:grid; place-items:center; height:100dvh; margin:0; }
-    a.btn { display:inline-block; padding:0.9rem 1.2rem; border:1px solid #333; border-radius:10px; text-decoration:none; color:#111; font-weight:600; }
+    /* ---- Base ---- */
+    :root {
+      --bg: #000;
+      --panel: rgba(24,24,24,0.9);
+      --border: #333;
+      --text: #fff;
+      --muted: #d7d7d7;
+      --accent: #1db954; /* Spotify green */
+      --accent-2: #1ed760;
+      --shadow: 0 0 30px rgba(0,0,0,0.7);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      display: grid;
+      grid-template-rows: auto 1fr;
+      overflow-x: hidden;
+    }
+
+    /* ---- Animated Background (Canvas) ---- */
+    #bg {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: -2;
+      background: radial-gradient(1200px 800px at 70% 20%, rgba(30,30,30,0.5), transparent 60%),
+                  radial-gradient(900px 600px at 20% 80%, rgba(25,25,25,0.6), transparent 65%),
+                  #000;
+    }
+
+    /* subtle vignette */
+    .vignette {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: -1;
+      background: radial-gradient(circle at center, transparent 60%, rgba(0,0,0,0.6) 100%);
+    }
+
+    /* ---- Top Hero Heading ---- */
+    header {
+      width: 100%;
+      padding: clamp(18px, 3vw, 28px) clamp(20px, 4vw, 40px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .hero-title {
+      font-size: clamp(1.6rem, 5vw, 3rem);
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      text-align: center;
+      line-height: 1.15;
+      margin: 0;
+      text-shadow: 0 0 18px rgba(29,185,84,0.15);
+    }
+
+    /* ---- Main Content ---- */
+    main {
+      display: grid;
+      place-items: center;
+      padding: 32px 16px 64px;
+      gap: 16px;
+    }
+
+    .box {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: clamp(20px, 5vw, 36px) clamp(20px, 5vw, 40px);
+      max-width: 720px;
+      width: min(92vw, 720px);
+      text-align: center;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
+    }
+
+    .box h1 {
+      font-size: clamp(1.4rem, 4.5vw, 2.2rem);
+      margin: 0 0 10px;
+      font-weight: 800;
+    }
+    .box p {
+      margin: 0;
+      font-size: clamp(1rem, 2.6vw, 1.12rem);
+      line-height: 1.6;
+      color: var(--muted);
+    }
+
+    /* ---- Button ---- */
+    a.btn {
+      display: inline-block;
+      margin-top: 1.2rem;
+      padding: 0.95rem 1.5rem;
+      border: none;
+      border-radius: 12px;
+      text-decoration: none;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+      font-size: 1rem;
+      transition: transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+      box-shadow: 0 10px 25px rgba(29,185,84,0.25);
+    }
+    a.btn:hover { background: var(--accent-2); transform: translateY(-1px) scale(1.03); }
+    a.btn:active { transform: translateY(0); }
+
+    /* ---- Animations ---- */
+    .fade-in {
+      opacity: 0;
+      transform: translateY(16px);
+      animation: fadeInUp 0.9s forwards ease-out;
+    }
+    .delay-1 { animation-delay: 0.6s; }
+    .delay-2 { animation-delay: 1.2s; }
+
+    @keyframes fadeInUp {
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Respect reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      .fade-in { animation: none; opacity: 1; transform: none; }
+    }
+
+    /* Small screens */
+    @media (max-width: 420px) {
+      .box { border-radius: 14px; }
+    }
   </style>
 </head>
 <body>
-  <a class="btn" href="{% url 'upload' %}">Upload a playlist</a>
+  <!-- Animated background -->
+  <canvas id="bg" aria-hidden="true"></canvas>
+  <div class="vignette" aria-hidden="true"></div>
+
+  <header>
+    <h2 class="hero-title">The best place to transfer your music</h2>
+  </header>
+
+  <main>
+    <!-- First intro box -->
+    <section class="box fade-in delay-1" aria-label="Intro">
+      <h1>Transfer your Apple playlist to a Spotify playlist</h1>
+      <p>
+        Bring your favorite Apple Music playlists to Spotify in just a few clicks.
+        We match your tracks with high accuracy so your vibe follows you — fast, simple, and free.
+      </p>
+    </section>
+
+    <!-- Upload call-to-action box -->
+    <section class="box fade-in delay-2" aria-label="Upload">
+      <p>Ready to go? Click below to upload your Apple Music playlist file and start transferring.</p>
+      <a class="btn" href="{% url 'upload' %}">Upload a Playlist</a>
+    </section>
+  </main>
+
+  <script>
+    // ====== Starfield + connecting lines (lightweight) ======
+    (function () {
+      const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const canvas = document.getElementById('bg');
+      const ctx = canvas.getContext('2d');
+
+      let w, h, dpr, particles, running = !prefersReduced;
+      const MAX_PARTICLES = 120; // auto-scaled below
+      const LINK_DIST = 110;     // px
+      const SPEED = 0.08;        // px per ms
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        w = canvas.width = Math.floor(window.innerWidth * dpr);
+        h = canvas.height = Math.floor(window.innerHeight * dpr);
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        initParticles();
+      }
+
+      function initParticles() {
+        const count = Math.min(MAX_PARTICLES, Math.round((window.innerWidth * window.innerHeight) / 14000));
+        particles = [];
+        for (let i = 0; i < count; i++) {
+          particles.push({
+            x: Math.random() * w,
+            y: Math.random() * h,
+            vx: (Math.random() * 2 - 1) * SPEED * dpr,
+            vy: (Math.random() * 2 - 1) * SPEED * dpr,
+            r: (Math.random() * 1.6 + 0.6) * dpr,
+            twinkle: Math.random() * Math.PI * 2
+          });
+        }
+      }
+
+      let last = performance.now();
+      function frame(now) {
+        if (!running) return;
+        const dt = Math.min(now - last, 50);
+        last = now;
+
+        ctx.clearRect(0, 0, w, h);
+
+        // Draw links
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < particles.length; i++) {
+          const a = particles[i];
+          for (let j = i + 1; j < particles.length; j++) {
+            const b = particles[j];
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < LINK_DIST * dpr) {
+              const alpha = 0.08 * (1 - dist / (LINK_DIST * dpr));
+              ctx.strokeStyle = `rgba(180, 180, 180, ${alpha})`;
+              ctx.lineWidth = dpr * 0.6;
+              ctx.beginPath();
+              ctx.moveTo(a.x, a.y);
+              ctx.lineTo(b.x, b.y);
+              ctx.stroke();
+            }
+          }
+        }
+        ctx.restore();
+
+        // Draw stars
+        for (const p of particles) {
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+
+          // wrap around edges
+          if (p.x < -20) p.x = w + 20;
+          if (p.x > w + 20) p.x = -20;
+          if (p.y < -20) p.y = h + 20;
+          if (p.y > h + 20) p.y = -20;
+
+          // twinkle
+          p.twinkle += dt * 0.003;
+          const glow = 0.2 + Math.sin(p.twinkle) * 0.4;
+
+          // star glow
+          const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 4);
+          grad.addColorStop(0, `rgba(255,255,255,${0.6 * glow})`);
+          grad.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * 4, 0, Math.PI * 2);
+          ctx.fill();
+
+          // core
+          ctx.fillStyle = `rgba(255,255,255,${0.95 * glow})`;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        requestAnimationFrame(frame);
+      }
+
+      // Pause animation when tab hidden (saves battery)
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          running = false;
+        } else if (!prefersReduced) {
+          running = true;
+          last = performance.now();
+          requestAnimationFrame(frame);
+        }
+      });
+
+      // Setup
+      window.addEventListener('resize', resize, { passive: true });
+      resize();
+
+      if (!prefersReduced) {
+        requestAnimationFrame(frame);
+      } else {
+        // If reduced motion, paint a single static starfield
+        for (let i = 0; i < (particles?.length || 80); i++) {
+          const x = Math.random() * w, y = Math.random() * h;
+          const r = (Math.random() * 1.6 + 0.6) * dpr;
+          ctx.fillStyle = 'rgba(255,255,255,0.9)';
+          ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    })();
+  </script>
 </body>
 </html>

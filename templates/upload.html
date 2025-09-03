@@ -5,65 +5,354 @@
   <title>Apple → Spotify: Upload</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    /* Force light theme */
-    html, body { background:#fff; color:#111; }
-    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; line-height:1.45; }
-    form { margin-bottom: 1rem; }
-    button, .btn { padding:0.5rem 0.9rem; border-radius:8px; border:1px solid #444; background:#fff; color:#111; cursor:pointer; }
-    .muted { color:#666; }
-    table { border-collapse:collapse; width:100%; margin-top:0.5rem; background:#fff; }
-    th,td { border:1px solid #ddd; padding:0.5rem; text-align:left; font-size:0.95rem; }
-    th { background:#f5f5f5; }
+    :root{
+      --bg:#000;
+      --panel:rgba(20,20,20,0.9);
+      --border:#2b2b2b;
+      --text:#fff;
+      --muted:#bdbdbd;
+      --accent:#1db954;
+      --accent-2:#1ed760;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      color:var(--text);
+      background:var(--bg);
+      display:grid;
+      grid-template-rows:auto 1fr;
+      overflow-x:hidden;
+    }
+
+    /* Background canvas sits behind everything */
+    #bg{
+      position:fixed;
+      inset:0;
+      width:100vw;height:100vh;
+      z-index:-2;
+      background:
+        radial-gradient(1100px 700px at 70% 15%, rgba(28,28,28,0.55), transparent 60%),
+        radial-gradient(900px 600px at 20% 85%, rgba(22,22,22,0.6), transparent 65%),
+        #000;
+    }
+
+    header{
+      width:100%;
+      padding: clamp(16px,3vw,28px) clamp(16px,4vw,40px);
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:14px;
+    }
+
+    .home-link{
+      color:var(--muted);
+      text-decoration:none;
+      font-weight:600;
+      border:1px solid var(--border);
+      padding:.55rem .85rem;
+      border-radius:10px;
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+      transition:background .15s ease, transform .15s ease, border-color .15s ease;
+    }
+    .home-link:hover{ transform:translateY(-1px); border-color:#3a3a3a; background:rgba(30,30,30,.6); }
+
+    .title{
+      margin:0 auto;
+      text-align:center;
+      font-weight:800;
+      letter-spacing:.02em;
+      font-size: clamp(1.3rem, 3.6vw, 2rem);
+      text-shadow:0 0 16px rgba(29,185,84,.12);
+      flex:1;
+    }
+
+    main{
+      display:grid;
+      place-items:center;
+      padding: clamp(18px, 4.5vw, 42px) 16px 64px;
+    }
+
+    .panel{
+      width:min(960px, 92vw);
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:18px;
+      padding: clamp(18px, 3.8vw, 28px) clamp(18px, 4.5vw, 36px);
+      box-shadow: 0 0 30px rgba(0,0,0,.7);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
+    }
+
+    h1{ margin:.2rem 0 1rem; font-size: clamp(1.2rem, 3.6vw, 1.6rem); }
+    .muted{ color:var(--muted); }
+
+    /* Forms rendered by {{ form.as_p }} */
+    form{ margin: 0 0 1rem; }
+    form p{ margin:.6rem 0; }
+    label{ display:block; margin: .35rem 0 .25rem; font-weight:600; }
+
+    input[type="text"], input[type="url"], input[type="search"],
+    input[type="email"], input[type="number"], select, textarea{
+      width:100%;
+      padding:.7rem .85rem;
+      border-radius:10px;
+      border:1px solid var(--border);
+      background:#0f0f0f;
+      color:var(--text);
+      outline:none;
+      transition:border-color .15s ease, box-shadow .15s ease;
+    }
+    input::placeholder, textarea::placeholder{ color:#9a9a9a; }
+    input:focus, select:focus, textarea:focus{
+      border-color:#3a3a3a;
+      box-shadow:0 0 0 3px rgba(29,185,84,.18);
+    }
+
+    /* Buttons */
+    button, .btn{
+      display:inline-block;
+      padding:.85rem 1.2rem;
+      border-radius:12px;
+      border:none;
+      background:var(--accent);
+      color:#fff;
+      font-weight:700;
+      cursor:pointer;
+      box-shadow:0 10px 25px rgba(29,185,84,.25);
+      transition: transform .15s ease, background .15s ease, box-shadow .15s ease;
+    }
+    button:hover, .btn:hover{ background:var(--accent-2); transform:translateY(-1px) scale(1.02); }
+    button:active, .btn:active{ transform:none; }
+
+    /* Tables */
+    table{
+      width:100%;
+      border-collapse:collapse;
+      margin-top:.75rem;
+      background:#0d0d0d;
+      border:1px solid var(--border);
+      border-radius:12px;
+      overflow:hidden;
+    }
+    th, td{
+      padding:.6rem .7rem;
+      text-align:left;
+      border-bottom:1px solid #1f1f1f;
+      font-size:.96rem;
+    }
+    th{ background:#121212; color:#e7e7e7; position:sticky; top:0; }
+    tr:nth-child(even) td{ background:#0f0f0f; }
+    tr:hover td{ background:#131313; }
+
+    /* Fade-in */
+    .fade-in{ opacity:0; transform:translateY(12px); animation:fade .8s .15s forwards ease-out; }
+    @keyframes fade{ to{ opacity:1; transform:none; } }
+
+    @media (max-width:560px){
+      .panel{ padding:18px; border-radius:14px; }
+      .home-link{ display:none; } /* keep top clean on mobile */
+    }
+    @media (prefers-reduced-motion: reduce){
+      .fade-in{ animation:none; opacity:1; transform:none; }
+    }
   </style>
 </head>
 <body>
-  <a href="{% url 'landing' %}">← Home</a>
-  <h1>Apple → Spotify: Upload</h1>
+  <!-- Background canvas -->
+  <canvas id="bg" aria-hidden="true"></canvas>
 
-  <!-- URL Import Form -->
-  <form action="{% url 'upload' %}" method="post">
-    {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit">Fetch playlist</button>
-    <span class="muted">Paste an Apple Music playlist URL, then click Fetch.</span>
-  </form>
+  <header>
+    <a class="home-link" href="{% url 'landing' %}">← Home</a>
+    <h2 class="title">Upload your Apple playlist and get it matched on Spotify</h2>
+    <span style="width:84px"></span> <!-- spacer to balance Home button -->
+  </header>
 
-  {% if error %}
-    <div style="background:#fee; color:#900; border:1px solid #f99; padding:.75rem; border-radius:.5rem; margin:.5rem 0;">
-      {{ error }}
-    </div>
-  {% endif %}
+  <main>
+    <section class="panel fade-in" aria-label="Upload panel">
+      <h1>Apple → Spotify: Upload</h1>
 
-  {% if uploaded_ok %}
-    {% if filename %}
-      <p><strong>Playlist:</strong> {{ filename }}, {{ count_total }} tracks found</p>
-    {% endif %}
+      <!-- URL Import Form -->
+      <form action="{% url 'upload' %}" method="post">
+        {% csrf_token %}
+        {{ form.as_p }}
+        <button type="submit">Fetch playlist</button>
+        <span class="muted" style="margin-left:.5rem;">Paste an Apple Music playlist URL, then click Fetch.</span>
+      </form>
 
-    {% if preview %}
-      <h2>Preview (first 10)</h2>
-      <table>
-        <tr><th>Title</th><th>Artist</th><th>Album</th><th>ISRC</th></tr>
-        {% for row in preview %}
-          <tr>
-            <td>{{ row.raw_title }}</td>
-            <td>{{ row.raw_artist }}</td>
-            <td>{{ row.raw_album }}</td>
-            <td>{{ row.raw_isrc }}</td>
-          </tr>
-        {% endfor %}
-      </table>
-    {% endif %}
+      {% if error %}
+        <div style="background:#2a0d0d; color:#ffd7d7; border:1px solid #612; padding:.8rem; border-radius:.6rem; margin:.75rem 0;">
+          {{ error }}
+        </div>
+      {% endif %}
 
-    <p><strong>{{ track_count }}</strong> tracks parsed and cached.</p>
+      {% if uploaded_ok %}
+        {% if filename %}
+          <p><strong>Playlist:</strong> {{ filename }}, {{ count_total }} tracks found</p>
+        {% endif %}
 
-    <!-- Match button → starts a job, then redirects to progress page -->
-    <form id="startMatch" method="post" action="{% url 'match_start' %}">
-      {% csrf_token %}
-      <button type="submit">Match Playlist</button>
-      <span class="muted">You’ll see a progress screen while we match.</span>
-    </form>
-  {% endif %}
+        {% if preview %}
+          <h2 style="margin-top:1rem;">Preview (first 10)</h2>
+          <table>
+            <tr><th>Title</th><th>Artist</th><th>Album</th><th>ISRC</th></tr>
+            {% for row in preview %}
+              <tr>
+                <td>{{ row.raw_title }}</td>
+                <td>{{ row.raw_artist }}</td>
+                <td>{{ row.raw_album }}</td>
+                <td>{{ row.raw_isrc }}</td>
+              </tr>
+            {% endfor %}
+          </table>
+        {% endif %}
 
+        <p><strong>{{ track_count }}</strong> tracks parsed and cached.</p>
+
+        <!-- Match button → starts a job, then redirects to progress page -->
+        <form id="startMatch" method="post" action="{% url 'match_start' %}">
+          {% csrf_token %}
+          <button type="submit">Match Playlist</button>
+          <span class="muted" style="margin-left:.5rem;">You’ll see a progress screen while we match.</span>
+        </form>
+      {% endif %}
+    </section>
+  </main>
+
+  <!-- Your exact starfield script (as provided) -->
+  <script>
+    // ====== Starfield + connecting lines (lightweight) ======
+    (function () {
+      const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const canvas = document.getElementById('bg');
+      const ctx = canvas.getContext('2d');
+
+      let w, h, dpr, particles, running = !prefersReduced;
+      const MAX_PARTICLES = 120; // auto-scaled below
+      const LINK_DIST = 110;     // px
+      const SPEED = 0.08;        // px per ms
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        w = canvas.width = Math.floor(window.innerWidth * dpr);
+        h = canvas.height = Math.floor(window.innerHeight * dpr);
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        initParticles();
+      }
+
+      function initParticles() {
+        const count = Math.min(MAX_PARTICLES, Math.round((window.innerWidth * window.innerHeight) / 14000));
+        particles = [];
+        for (let i = 0; i < count; i++) {
+          particles.push({
+            x: Math.random() * w,
+            y: Math.random() * h,
+            vx: (Math.random() * 2 - 1) * SPEED * dpr,
+            vy: (Math.random() * 2 - 1) * SPEED * dpr,
+            r: (Math.random() * 1.6 + 0.6) * dpr,
+            twinkle: Math.random() * Math.PI * 2
+          });
+        }
+      }
+
+      let last = performance.now();
+      function frame(now) {
+        if (!running) return;
+        const dt = Math.min(now - last, 50);
+        last = now;
+
+        ctx.clearRect(0, 0, w, h);
+
+        // Draw links
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < particles.length; i++) {
+          const a = particles[i];
+          for (let j = i + 1; j < particles.length; j++) {
+            const b = particles[j];
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < LINK_DIST * dpr) {
+              const alpha = 0.08 * (1 - dist / (LINK_DIST * dpr));
+              ctx.strokeStyle = `rgba(180, 180, 180, ${alpha})`;
+              ctx.lineWidth = dpr * 0.6;
+              ctx.beginPath();
+              ctx.moveTo(a.x, a.y);
+              ctx.lineTo(b.x, b.y);
+              ctx.stroke();
+            }
+          }
+        }
+        ctx.restore();
+
+        // Draw stars
+        for (const p of particles) {
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+
+          // wrap around edges
+          if (p.x < -20) p.x = w + 20;
+          if (p.x > w + 20) p.x = -20;
+          if (p.y < -20) p.y = h + 20;
+          if (p.y > h + 20) p.y = -20;
+
+          // twinkle
+          p.twinkle += dt * 0.003;
+          const glow = 0.2 + Math.sin(p.twinkle) * 0.4;
+
+          // star glow
+          const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 4);
+          grad.addColorStop(0, `rgba(255,255,255,${0.6 * glow})`);
+          grad.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * 4, 0, Math.PI * 2);
+          ctx.fill();
+
+          // core
+          ctx.fillStyle = `rgba(255,255,255,${0.95 * glow})`;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        requestAnimationFrame(frame);
+      }
+
+      // Pause animation when tab hidden (saves battery)
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          running = false;
+        } else if (!prefersReduced) {
+          running = true;
+          last = performance.now();
+          requestAnimationFrame(frame);
+        }
+      });
+
+      // Setup
+      window.addEventListener('resize', resize, { passive: true });
+      resize();
+
+      if (!prefersReduced) {
+        requestAnimationFrame(frame);
+      } else {
+        // If reduced motion, paint a single static starfield
+        for (let i = 0; i < (particles?.length || 80); i++) {
+          const x = Math.random() * w, y = Math.random() * h;
+          const r = (Math.random() * 1.6 + 0.6) * dpr;
+          ctx.fillStyle = 'rgba(255,255,255,0.9)';
+          ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    })();
+  </script>
+
+  <!-- Keep your existing CSRF helper + match-start logic intact -->
   <script>
     // CSRF helper for fetch POST
     function getCookie(name) {
