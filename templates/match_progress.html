@@ -18,13 +18,20 @@
     }
     *{box-sizing:border-box}
     html,body{height:100%}
+
+    /* Vertically center the stack */
     body{
       margin:0;
       font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
       color:var(--text);
       background:var(--bg);
-      display:grid;
-      place-items:center;
+      display:flex;
+      flex-direction:column;
+      align-items:center;          /* center horizontally */
+      justify-content:center;      /* center vertically */
+      min-height:100vh;
+      padding:24px 16px;
+      gap:14px;                    /* space between progress block and facts */
       overflow-x:hidden;
       text-align:center;
     }
@@ -50,16 +57,21 @@
     }
     a.home-link:hover{background:rgba(30,30,30,.6);border-color:#3a3a3a;}
 
-    /* Center content sits just above the facts panel */
+    /* Progress block */
     .center-stack{
       width:min(780px,92vw);
-      margin-bottom:12px; /* small, tidy gap above facts panel */
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      gap:8px;        /* internal spacing */
+      margin:0;
     }
     @media (max-width:560px){
-      .center-stack{ width:min(96vw,560px); margin-bottom:10px; }
+      body{ padding-top:60px; } /* keep Home button from overlapping on small screens */
+      .center-stack{ width:min(96vw,560px); }
     }
 
-    h1{margin:0 0 1.2rem; font-size:clamp(1.3rem,4vw,2rem);}
+    h1{ margin:0; font-size:clamp(1.3rem,4vw,2rem); }
 
     .bar-wrap{
       width:100%;
@@ -68,7 +80,7 @@
       border-radius:999px;
       overflow:hidden;
       border:1px solid var(--border);
-      margin:0 auto 1rem;
+      margin:0;
     }
     .bar{
       height:100%;
@@ -78,9 +90,15 @@
       box-shadow:0 6px 18px rgba(29,185,84,.25) inset;
     }
 
-    .row{display:flex; justify-content:center; align-items:center; gap:1rem; margin-bottom:1rem;}
-    .muted{color:var(--muted)}
-    .error{color:#f88; margin-top:1rem}
+    .row{
+      display:flex;
+      justify-content:center;
+      align-items:center;
+      gap:12px;
+      margin:0;
+    }
+    .muted{ color:var(--muted); }
+    .error{ color:#f88; margin-top:8px; }
 
     /* Facts panel (outer box) — fixed height set via JS to fit longest fact */
     .facts{
@@ -93,17 +111,17 @@
       backdrop-filter: blur(3px);
       -webkit-backdrop-filter: blur(3px);
       text-align:left;
-      overflow:hidden; /* keep height stable */
+      overflow:hidden; /* keep height stable while inner content fades */
     }
     .facts h2{
-      margin:.2rem 0 .6rem;
+      margin:.15rem 0 .35rem;
       font-size:clamp(1rem,2.6vw,1.1rem);
       letter-spacing:.01em;
       color:#eaeaea;
       opacity:.9;
     }
 
-    /* Inner fact box may vary in intrinsic height, but outer facts panel remains fixed */
+    /* Inner fact box (content may vary, outer stays fixed) */
     .fact-box{
       border:1px solid #333;
       background:#0f0f0f;
@@ -115,11 +133,8 @@
       color:#ddd;
     }
 
-    /* Smoother fade (slightly longer, no vertical shift = less jitter) */
-    @keyframes factFade {
-      from { opacity:0; }
-      to   { opacity:1; }
-    }
+    /* Smooth fade for fact text */
+    @keyframes factFade { from{opacity:0;} to{opacity:1;} }
     .fact-text{
       font-size: clamp(.98rem, 2.4vw, 1.05rem);
       animation: factFade .7s ease-out;
@@ -152,7 +167,7 @@
     </div>
   </section>
 
-  <!-- Starfield background (your exact script & timing) -->
+  <!-- Starfield background -->
   <script>
     // ====== Starfield + connecting lines (lightweight) ======
     (function () {
@@ -161,9 +176,9 @@
       const ctx = canvas.getContext('2d');
 
       let w, h, dpr, particles, running = !prefersReduced;
-      const MAX_PARTICLES = 120; // auto-scaled below
-      const LINK_DIST = 110;     // px
-      const SPEED = 0.08;        // px per ms
+      const MAX_PARTICLES = 120;
+      const LINK_DIST = 110;
+      const SPEED = 0.08;
 
       function resize() {
         dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -225,13 +240,11 @@
           p.x += p.vx * dt;
           p.y += p.vy * dt;
 
-          // wrap
           if (p.x < -20) p.x = w + 20;
           if (p.x > w + 20) p.x = -20;
           if (p.y < -20) p.y = h + 20;
           if (p.y > h + 20) p.y = -20;
 
-          // twinkle
           p.twinkle += dt * 0.003;
           const glow = 0.2 + Math.sin(p.twinkle) * 0.4;
 
@@ -291,9 +304,8 @@
         return i;
       }
 
-      // Measure the tallest fact and fix the OUTER facts panel height accordingly
+      // Measure tallest fact and lock OUTER panel height
       function lockFactsPanelHeight(){
-        // create a hidden measuring clone with same width & styles
         const clone = factsPanel.cloneNode(true);
         clone.style.position = "absolute";
         clone.style.visibility = "hidden";
@@ -308,14 +320,12 @@
         let maxBoxH = 0;
         for (const f of MUSIC_FACTS){
           cText.textContent = f;
-          // Force layout width the same as real box to measure wrapping
           cBox.style.width = factBox.clientWidth + "px";
           cBox.style.height = "auto";
           const h = cBox.offsetHeight;
           if (h > maxBoxH) maxBoxH = h;
         }
 
-        // Real panel height: header + paddings + tallest fact box
         const styles = getComputedStyle(factsPanel);
         const padY = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
         const headerH = factsPanel.querySelector("h2").offsetHeight;
@@ -325,9 +335,7 @@
       }
 
       function showFact() {
-        // restart fade animation cleanly
         el.style.animation = "none";
-        // Force reflow
         void el.offsetWidth;
         el.textContent = MUSIC_FACTS[pickIndex()];
         el.style.animation = "factFade .7s ease-out";
@@ -335,19 +343,12 @@
 
       function onResizeDebounced(){
         clearTimeout(timer);
-        timer = setTimeout(() => {
-          lockFactsPanelHeight();
-        }, 100);
+        timer = setTimeout(lockFactsPanelHeight, 100);
       }
 
-      // initial paint & lock
       showFact();
-      // lock after first render (ensure widths are known)
       requestAnimationFrame(lockFactsPanelHeight);
-
-      // rotate
       setInterval(showFact, INTERVAL_MS);
-      // recompute on resize
       window.addEventListener("resize", onResizeDebounced, { passive:true });
     })();
   </script>
