@@ -7,7 +7,7 @@
   <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <style>
-    :root {
+    :root{
       --bg:#000;
       --panel:rgba(20,20,20,0.9);
       --border:#2b2b2b;
@@ -16,25 +16,24 @@
       --accent:#1db954;
       --accent-2:#1ed760;
     }
-    *{box-sizing:border-box;}
-    html,body{height:100%;}
+    *{box-sizing:border-box}
+    html,body{height:100%}
     body{
       margin:0;
       font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
       color:var(--text);
       background:var(--bg);
-      display:flex;
-      flex-direction:column;
-      align-items:center;
-      justify-content:center;
+      display:grid;
+      place-items:center;
+      overflow-x:hidden;
       text-align:center;
     }
 
+    /* Background canvas */
     #bg{
       position:fixed;
       inset:0;
-      width:100vw;
-      height:100vh;
+      width:100vw;height:100vh;
       z-index:-2;
       background:
         radial-gradient(1100px 700px at 70% 15%, rgba(28,28,28,0.55), transparent 60%),
@@ -43,58 +42,117 @@
     }
 
     a.home-link{
-      position:absolute;
-      top:20px;
-      left:20px;
-      text-decoration:none;
-      color:var(--muted);
-      font-weight:600;
-      border:1px solid var(--border);
-      padding:.5rem .8rem;
-      border-radius:10px;
+      position:absolute; top:20px; left:20px;
+      text-decoration:none; color:var(--muted); font-weight:600;
+      border:1px solid var(--border); padding:.5rem .8rem; border-radius:10px;
       backdrop-filter:blur(2px);
       transition:background .15s ease,border-color .15s ease;
     }
     a.home-link:hover{background:rgba(30,30,30,.6);border-color:#3a3a3a;}
 
-    h1{margin-bottom:2rem;font-size:clamp(1.4rem,4vw,2rem);}
+    /* Center content, shifted up slightly to make room for facts box */
+    .center-stack{
+      transform: translateY(-6vh);
+      width:min(780px,92vw);
+    }
+    @media (max-width:560px){
+      .center-stack{ transform: translateY(-3vh); width:min(96vw, 560px); }
+    }
+
+    h1{margin:0 0 1.4rem; font-size:clamp(1.3rem,4vw,2rem);}
 
     .bar-wrap{
-      width:min(700px,90%);
+      width:100%;
       height:28px;
       background:#111;
       border-radius:999px;
       overflow:hidden;
       border:1px solid var(--border);
-      margin-bottom:1rem;
+      margin:0 auto 1rem;
     }
     .bar{
       height:100%;
       width:0%;
       background:var(--accent);
       transition:width .18s ease;
+      box-shadow:0 6px 18px rgba(29,185,84,.25) inset;
     }
 
-    .row{display:flex;justify-content:center;align-items:center;gap:1rem;margin-bottom:1rem;}
-    .muted{color:var(--muted);}
-    .error{color:#f88;margin-top:1rem;}
+    .row{display:flex; justify-content:center; align-items:center; gap:1rem; margin-bottom:1rem;}
+    .muted{color:var(--muted)}
+    .error{color:#f88; margin-top:1rem}
+
+    /* Facts panel */
+    .facts{
+      width:min(860px,92vw);
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:16px;
+      padding:1rem 1.2rem;
+      margin-top:20px;
+      box-shadow:0 0 30px rgba(0,0,0,.7);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
+      text-align:left;
+    }
+    .facts h2{
+      margin:.2rem 0 .6rem;
+      font-size:clamp(1rem,2.6vw,1.1rem);
+      letter-spacing:.01em;
+      color:#eaeaea;
+      opacity:.9;
+    }
+    .fact-box{
+      border:1px solid #333;
+      background:#0f0f0f;
+      border-radius:12px;
+      padding:1rem 1.1rem;
+      min-height:64px;
+      display:flex;
+      align-items:center;
+      line-height:1.55;
+      color:#ddd;
+      position:relative;
+    }
+
+    /* Fade-in animation for fact text */
+    @keyframes factFade {
+      from { opacity:0; transform: translateY(6px); }
+      to   { opacity:1; transform: translateY(0); }
+    }
+    .fact-text{
+      font-size: clamp(.98rem, 2.4vw, 1.05rem);
+      animation: factFade .55s ease-out;
+    }
   </style>
 </head>
 <body data-job-id="{{ job_id }}" data-total="{{ total|default:0 }}">
   <canvas id="bg" aria-hidden="true"></canvas>
 
   <a href="{% url 'landing' %}" class="home-link">← Home</a>
-  <h1>Matching your playlist…</h1>
 
-  <div class="bar-wrap"><div id="bar" class="bar"></div></div>
-  <div class="row">
-    <div id="pct"><strong>0%</strong></div>
-    <div class="muted" id="counts">0 / {{ total|default:"?" }}</div>
+  <div class="center-stack">
+    <h1>Matching your playlist…</h1>
+
+    <div class="bar-wrap" aria-hidden="true"><div id="bar" class="bar"></div></div>
+    <div class="row">
+      <div id="pct"><strong>0%</strong></div>
+      <div class="muted" id="counts">0 / {{ total|default:"?" }}</div>
+    </div>
+    <p class="muted">Please keep this tab open while we match tracks.</p>
+
+    <div id="err" class="error" role="alert" style="display:none;"></div>
   </div>
-  <p class="muted">Please keep this tab open while we match tracks.</p>
-  <div id="err" class="error" role="alert" style="display:none;"></div>
 
-  <!-- Starfield background script -->
+  <!-- Facts panel -->
+  <section class="facts" aria-live="polite" aria-atomic="true">
+    <h2>Did you know?</h2>
+    <div class="fact-box">
+      <div id="factText" class="fact-text">Loading a cool music fact…</div>
+    </div>
+  </section>
+
+  <!-- Starfield background (your exact script & timing) -->
   <script>
     // ====== Starfield + connecting lines (lightweight) ======
     (function () {
@@ -103,9 +161,9 @@
       const ctx = canvas.getContext('2d');
 
       let w, h, dpr, particles, running = !prefersReduced;
-      const MAX_PARTICLES = 120;
-      const LINK_DIST = 110;
-      const SPEED = 0.08;
+      const MAX_PARTICLES = 120; // auto-scaled below
+      const LINK_DIST = 110;     // px
+      const SPEED = 0.08;        // px per ms
 
       function resize() {
         dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -167,11 +225,13 @@
           p.x += p.vx * dt;
           p.y += p.vy * dt;
 
+          // wrap
           if (p.x < -20) p.x = w + 20;
           if (p.x > w + 20) p.x = -20;
           if (p.y < -20) p.y = h + 20;
           if (p.y > h + 20) p.y = -20;
 
+          // twinkle
           p.twinkle += dt * 0.003;
           const glow = 0.2 + Math.sin(p.twinkle) * 0.4;
 
@@ -179,44 +239,78 @@
           grad.addColorStop(0, `rgba(255,255,255,${0.6 * glow})`);
           grad.addColorStop(1, 'rgba(255,255,255,0)');
           ctx.fillStyle = grad;
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.r * 4, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 4, 0, Math.PI * 2); ctx.fill();
 
           ctx.fillStyle = `rgba(255,255,255,${0.95 * glow})`;
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
         }
 
         requestAnimationFrame(frame);
       }
 
       document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-          running = false;
-        } else if (!prefersReduced) {
-          running = true;
-          last = performance.now();
-          requestAnimationFrame(frame);
-        }
+        if (document.hidden) { running = false; }
+        else if (!prefersReduced) { running = true; last = performance.now(); requestAnimationFrame(frame); }
       });
 
-      window.addEventListener('resize', resize, { passive: true });
+      window.addEventListener('resize', resize, { passive:true });
       resize();
-
-      if (!prefersReduced) {
-        requestAnimationFrame(frame);
-      }
+      if (!prefersReduced) requestAnimationFrame(frame);
     })();
   </script>
 
-  <!-- Progress bar logic (unchanged) -->
+  <!-- Facts: 10 diverse, interesting music nuggets -->
+  <script>
+    const MUSIC_FACTS = [
+      "The oldest surviving written melody is the “Hurrian Hymn No. 6,” dating to around 1400 BCE from ancient Ugarit.",
+      "John Cage’s piece 4′33″ instructs performers to remain silent, highlighting ambient sound as the music.",
+      "A standard modern piano keyboard has 88 keys spanning a range of just over seven octaves.",
+      "Stradivarius violins are prized for their craftsmanship and tone, with some valued at millions of dollars.",
+      "Vinyl records have seen a major resurgence in the 2010s and 2020s, with annual sales climbing again.",
+      "The ISRC (International Standard Recording Code) uniquely identifies sound recordings for tracking and royalties.",
+      "Wolfgang Amadeus Mozart composed more than 600 works across symphonies, operas, chamber music, and more.",
+      "The theremin is one of the only instruments played without physical contact, using hand proximity to control pitch and volume.",
+      "Michael Jackson’s “Thriller” is among the best-selling albums of all time and reshaped the music video era.",
+      "The Beatles hold the record for the most Billboard Hot 100 No. 1 hits by a group."
+    ];
+
+    (function factsRotator(){
+      const el = document.getElementById("factText");
+      const INTERVAL_MS = 5000;
+      let lastIndex = -1;
+
+      function pickIndex(){
+        if (MUSIC_FACTS.length <= 1) return 0;
+        let i = Math.floor(Math.random() * MUSIC_FACTS.length);
+        if (i === lastIndex) {
+          i = (i + 1) % MUSIC_FACTS.length; // avoid immediate repeats
+        }
+        lastIndex = i;
+        return i;
+      }
+
+      function showFact() {
+        // restart fade animation cleanly
+        el.style.animation = "none";
+        // Force reflow
+        void el.offsetWidth;
+        el.textContent = MUSIC_FACTS[pickIndex()];
+        el.style.animation = "factFade .55s ease-out";
+      }
+
+      // initial paint
+      showFact();
+      setInterval(showFact, INTERVAL_MS);
+    })();
+  </script>
+
+  <!-- Progress logic (unchanged) -->
   <script>
     function getCookie(name) {
       const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
       return m ? decodeURIComponent(m.pop()) : '';
     }
+
     (function () {
       const jobId = document.body.dataset.jobId || '';
       let totalCount = Number(document.body.dataset.total || '0') || 0;
