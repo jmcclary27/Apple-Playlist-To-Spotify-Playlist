@@ -5,72 +5,327 @@
   <title>Matched Results</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    /* Force light theme */
-    html, body { background:#fff; color:#111; }
-    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin:2rem; }
-    .row { display:flex; gap:1rem; align-items:center; flex-wrap: wrap; }
-    .btn { padding:0.5rem 0.9rem; border:1px solid #444; border-radius:8px; background:#fff; color:#111; text-decoration:none; cursor:pointer; }
-    .btn[disabled] { opacity:.5; cursor:not-allowed; }
-    .muted { color:#666; }
-    .ok { color:#0a7a0a; }
-    .warn { color:#b00020; }
-    table { border-collapse:collapse; width:100%; margin-top:1rem; background:#fff; }
-    th,td { border:1px solid #ddd; padding:0.5rem; text-align:left; font-size:0.95rem; }
-    th { background:#f5f5f5; position:sticky; top:0; z-index:1; }
-    .toolbar { display:flex; gap:.5rem; align-items:center; margin:1rem 0; }
+    :root{
+      --bg:#000;
+      --panel:rgba(20,20,20,0.9);
+      --border:#2b2b2b;
+      --text:#fff;
+      --muted:#bdbdbd;
+      --accent:#1db954;
+      --accent-2:#1ed760;
+      --ok:#1db954;
+      --warn:#ff6b6b;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      color:var(--text);
+      background:var(--bg);
+      display:grid;
+      grid-template-rows:auto 1fr;
+      overflow-x:hidden;
+    }
+
+    /* Background canvas */
+    #bg{
+      position:fixed;
+      inset:0;
+      width:100vw;height:100vh;
+      z-index:-2;
+      background:
+        radial-gradient(1100px 700px at 70% 15%, rgba(28,28,28,0.55), transparent 60%),
+        radial-gradient(900px 600px at 20% 85%, rgba(22,22,22,0.6), transparent 65%),
+        #000;
+    }
+
+    header{
+      width:100%;
+      padding: clamp(16px,3vw,28px) clamp(16px,4vw,40px);
+      display:flex; align-items:center; justify-content:space-between; gap:12px;
+    }
+    a.home-link{
+      text-decoration:none; color:var(--muted); font-weight:600;
+      border:1px solid var(--border); padding:.55rem .85rem; border-radius:10px;
+      backdrop-filter:blur(2px);
+      transition:background .15s ease,border-color .15s ease, transform .15s ease;
+    }
+    a.home-link:hover{background:rgba(30,30,30,.6);border-color:#3a3a3a; transform:translateY(-1px);}
+    h1.title{
+      margin:0; text-align:center; flex:1;
+      font-weight:800; letter-spacing:.02em;
+      font-size:clamp(1.3rem,4vw,2rem);
+      text-shadow:0 0 16px rgba(29,185,84,.12);
+    }
+    .spacer{width:110px;} /* balances the Home button space */
+
+    main{
+      display:grid; place-items:center;
+      padding: 8px 16px 40px;
+    }
+    .panel{
+      width:min(1100px,96vw);
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:18px;
+      padding: clamp(18px, 3.8vw, 28px) clamp(18px, 4.5vw, 36px);
+      box-shadow:0 0 30px rgba(0,0,0,.7);
+      backdrop-filter: blur(3px);
+      -webkit-backdrop-filter: blur(3px);
+    }
+
+    .row{ display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
+    .muted{ color:var(--muted); }
+    .ok{ color:var(--ok); }
+    .warn{ color:var(--warn); }
+
+    /* Buttons */
+    .btn{
+      padding:.85rem 1.2rem;
+      border-radius:12px;
+      border:none;
+      background:var(--accent);
+      color:#fff;
+      text-decoration:none;
+      cursor:pointer;
+      font-weight:700;
+      box-shadow:0 10px 25px rgba(29,185,84,.25);
+      transition: transform .15s ease, background .15s ease, box-shadow .15s ease;
+    }
+    .btn:hover{ background:var(--accent-2); transform:translateY(-1px) scale(1.02); }
+    .btn[disabled]{ opacity:.55; cursor:not-allowed; transform:none; box-shadow:none; }
+
+    .toolbar{ display:flex; gap:.6rem; align-items:center; margin:1rem 0; flex-wrap:wrap; }
+
+    /* Table (dark) */
+    .table-wrap{ overflow:auto; border-radius:12px; border:1px solid var(--border); }
+    table{
+      width:100%;
+      border-collapse:collapse;
+      background:#0d0d0d;
+      min-width:720px;
+    }
+    th,td{
+      border-bottom:1px solid #1f1f1f;
+      padding:.6rem .7rem;
+      text-align:left;
+      font-size:.96rem;
+    }
+    th{
+      background:#121212;
+      color:#e7e7e7;
+      position:sticky; top:0; z-index:1;
+    }
+    tr:nth-child(even) td{ background:#0f0f0f; }
+    tr:hover td{ background:#131313; }
+
+    a.inline{
+      color:#bfeccc;
+      text-decoration:underline;
+      text-underline-offset:2px;
+    }
+
+    @media (max-width:560px){
+      .panel{ padding:18px; border-radius:14px; }
+    }
   </style>
 </head>
 <body>
-  <a href="{% url 'landing' %}">← Home</a>
-  <h1>Matched Results</h1>
+  <canvas id="bg" aria-hidden="true"></canvas>
 
-  {% if created %}
-    <p class="ok">✅ Playlist created! <a href="{{ playlist_url }}" target="_blank" rel="noopener">Open in Spotify</a></p>
-  {% endif %}
+  <header>
+    <a class="home-link" href="{% url 'landing' %}">← Home</a>
+    <h1 class="title">Matched Results</h1>
+    <span class="spacer"></span>
+  </header>
 
-  <div class="row" role="status" aria-live="polite">
-    <div><strong>Total:</strong> {{ summary.total|default:results|length }}</div>
-    <div>
-      <strong>Matched:</strong> {{ summary.matched|default:0 }}
-      &nbsp;|&nbsp; <strong>Fuzzy:</strong> {{ summary.fuzzy_matched|default:0 }}
-      &nbsp;|&nbsp; <strong>Not found:</strong> {{ summary.not_found|default:0 }}
-    </div>
-  </div>
+  <main>
+    <section class="panel">
+      {% if created %}
+        <p class="ok">✅ Playlist created!
+          <a class="inline" href="{{ playlist_url }}" target="_blank" rel="noopener">Open in Spotify</a>
+        </p>
+      {% endif %}
 
-  <div class="toolbar">
-    <!-- One-click CSV download; self-disables to prevent repeated downloads -->
-    <button id="csvBtn" class="btn" type="button"
-            data-url="{% url 'match_report_csv' job_id=job_id %}">
-      Download CSV report
-    </button>
+      <div class="row" role="status" aria-live="polite">
+        <div><strong>Total:</strong> {{ summary.total|default:results|length }}</div>
+        <div>
+          <strong>Matched:</strong> {{ summary.matched|default:0 }}
+          &nbsp;|&nbsp; <strong>Fuzzy:</strong> {{ summary.fuzzy_matched|default:0 }}
+          &nbsp;|&nbsp; <strong>Not found:</strong> {{ summary.not_found|default:0 }}
+        </div>
+      </div>
 
-    <!-- Create Playlist: prompt for name, then redirect to OAuth with params -->
-    <button id="createBtn" class="btn" type="button"
-            data-login-url="{% url 'spotify_login' %}"
-            data-job="{{ job_id }}"
-            data-next="{{ request.path|urlencode }}"
-            data-default-name="{{ source_name|default:'Imported from Apple Music' }}">
-      Create Spotify Playlist
-    </button>
+      <div class="toolbar">
+        <!-- One-click CSV download -->
+        <button id="csvBtn" class="btn" type="button"
+                data-url="{% url 'match_report_csv' job_id=job_id %}">
+          Download CSV report
+        </button>
 
-    <span class="muted">Scroll to review; unmatched are highlighted.</span>
-  </div>
+        <!-- Create Playlist: prompt for name, then redirect to OAuth with params -->
+        <button id="createBtn" class="btn" type="button"
+                data-login-url="{% url 'spotify_login' %}"
+                data-job="{{ job_id }}"
+                data-next="{{ request.path|urlencode }}"
+                data-default-name="{{ source_name|default:'Imported from Apple Music' }}">
+          Create Spotify Playlist
+        </button>
 
-  <table aria-label="Match results">
-    <tr>
-      <th>Status</th><th>Score</th><th>Title</th><th>Artist</th><th>Album</th><th>Spotify ID</th>
-    </tr>
-    {% for r in results %}
-      <tr>
-        <td class="{% if r.status != 'not_found' %}ok{% else %}warn{% endif %}">{{ r.status }}</td>
-        <td>{{ r.score|default:"" }}</td>
-        <td>{{ r.raw_title }}</td>
-        <td>{{ r.raw_artist }}</td>
-        <td>{{ r.raw_album }}</td>
-        <td>{{ r.spotify_id }}</td>
-      </tr>
-    {% endfor %}
-  </table>
+        <span class="muted">Scroll to review; unmatched are highlighted.</span>
+      </div>
+
+      <div class="table-wrap">
+        <table aria-label="Match results">
+          <tr>
+            <th>Status</th><th>Score</th><th>Title</th><th>Artist</th><th>Album</th><th>Spotify ID</th>
+          </tr>
+          {% for r in results %}
+            <tr>
+              <td class="{% if r.status != 'not_found' %}ok{% else %}warn{% endif %}">{{ r.status }}</td>
+              <td>{{ r.score|default:"" }}</td>
+              <td>{{ r.raw_title }}</td>
+              <td>{{ r.raw_artist }}</td>
+              <td>{{ r.raw_album }}</td>
+              <td>{{ r.spotify_id }}</td>
+            </tr>
+          {% endfor %}
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Starfield background (your exact script) -->
+  <script>
+    // ====== Starfield + connecting lines (lightweight) ======
+    (function () {
+      const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const canvas = document.getElementById('bg');
+      const ctx = canvas.getContext('2d');
+
+      let w, h, dpr, particles, running = !prefersReduced;
+      const MAX_PARTICLES = 120; // auto-scaled below
+      const LINK_DIST = 110;     // px
+      const SPEED = 0.08;        // px per ms
+
+      function resize() {
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+        w = canvas.width = Math.floor(window.innerWidth * dpr);
+        h = canvas.height = Math.floor(window.innerHeight * dpr);
+        canvas.style.width = window.innerWidth + 'px';
+        canvas.style.height = window.innerHeight + 'px';
+        initParticles();
+      }
+
+      function initParticles() {
+        const count = Math.min(MAX_PARTICLES, Math.round((window.innerWidth * window.innerHeight) / 14000));
+        particles = [];
+        for (let i = 0; i < count; i++) {
+          particles.push({
+            x: Math.random() * w,
+            y: Math.random() * h,
+            vx: (Math.random() * 2 - 1) * SPEED * dpr,
+            vy: (Math.random() * 2 - 1) * SPEED * dpr,
+            r: (Math.random() * 1.6 + 0.6) * dpr,
+            twinkle: Math.random() * Math.PI * 2
+          });
+        }
+      }
+
+      let last = performance.now();
+      function frame(now) {
+        if (!running) return;
+        const dt = Math.min(now - last, 50);
+        last = now;
+
+        ctx.clearRect(0, 0, w, h);
+
+        // Draw links
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        for (let i = 0; i < particles.length; i++) {
+          const a = particles[i];
+          for (let j = i + 1; j < particles.length; j++) {
+            const b = particles[j];
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist < LINK_DIST * dpr) {
+              const alpha = 0.08 * (1 - dist / (LINK_DIST * dpr));
+              ctx.strokeStyle = `rgba(180, 180, 180, ${alpha})`;
+              ctx.lineWidth = dpr * 0.6;
+              ctx.beginPath();
+              ctx.moveTo(a.x, a.y);
+              ctx.lineTo(b.x, b.y);
+              ctx.stroke();
+            }
+          }
+        }
+        ctx.restore();
+
+        // Draw stars
+        for (const p of particles) {
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+
+          // wrap around edges
+          if (p.x < -20) p.x = w + 20;
+          if (p.x > w + 20) p.x = -20;
+          if (p.y < -20) p.y = h + 20;
+          if (p.y > h + 20) p.y = -20;
+
+          // twinkle
+          p.twinkle += dt * 0.003;
+          const glow = 0.2 + Math.sin(p.twinkle) * 0.4;
+
+          // star glow
+          const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 4);
+          grad.addColorStop(0, `rgba(255,255,255,${0.6 * glow})`);
+          grad.addColorStop(1, 'rgba(255,255,255,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r * 4, 0, Math.PI * 2);
+          ctx.fill();
+
+          // core
+          ctx.fillStyle = `rgba(255,255,255,${0.95 * glow})`;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        requestAnimationFrame(frame);
+      }
+
+      // Pause animation when tab hidden (saves battery)
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          running = false;
+        } else if (!prefersReduced) {
+          running = true;
+          last = performance.now();
+          requestAnimationFrame(frame);
+        }
+      });
+
+      // Setup
+      window.addEventListener('resize', resize, { passive: true });
+      resize();
+
+      if (!prefersReduced) {
+        requestAnimationFrame(frame);
+      } else {
+        // If reduced motion, paint a single static starfield
+        for (let i = 0; i < (particles?.length || 80); i++) {
+          const x = Math.random() * w, y = Math.random() * h;
+          const r = (Math.random() * 1.6 + 0.6) * dpr;
+          ctx.fillStyle = 'rgba(255,255,255,0.9)';
+          ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    })();
+  </script>
 
   <script>
     // CSV: trigger exactly once per click; optional re-enable after a short delay
