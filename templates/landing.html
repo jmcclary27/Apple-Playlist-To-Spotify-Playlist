@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+{% load static %}
 <head>
   <meta charset="utf-8" />
   <title>Apple → Spotify</title>
@@ -15,6 +16,7 @@
       --accent: #1db954; /* Spotify green */
       --accent-2: #1ed760;
       --shadow: 0 0 30px rgba(0,0,0,0.7);
+      --brand: #500000; /* maroon accent for tabs */
     }
 
     * { box-sizing: border-box; }
@@ -101,8 +103,8 @@
       color: var(--muted);
     }
 
-    /* ---- Button ---- */
-    a.btn {
+    /* ---- Button (anchor or button element) ---- */
+    a.btn, button.btn {
       display: inline-block;
       margin-top: 1.2rem;
       padding: 0.95rem 1.5rem;
@@ -115,9 +117,10 @@
       font-size: 1rem;
       transition: transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
       box-shadow: 0 10px 25px rgba(29,185,84,0.25);
+      cursor: pointer;
     }
-    a.btn:hover { background: var(--accent-2); transform: translateY(-1px) scale(1.03); }
-    a.btn:active { transform: translateY(0); }
+    a.btn:hover, button.btn:hover { background: var(--accent-2); transform: translateY(-1px) scale(1.03); }
+    a.btn:active, button.btn:active { transform: translateY(0); }
 
     /* ---- Animations ---- */
     .fade-in {
@@ -141,6 +144,39 @@
     @media (max-width: 420px) {
       .box { border-radius: 14px; }
     }
+
+    /* ---------- Modal styles ---------- */
+    .hidden { display: none; }
+    .modal {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 50;
+      padding: 16px;
+    }
+    .modal-card {
+      background: #111;
+      color: #fff;
+      border: 1px solid #2a2a2a;
+      border-radius: 14px;
+      width: min(92vw, 420px);
+      box-shadow: var(--shadow);
+      padding: 16px;
+    }
+    .tabs { display: flex; gap: .5rem; margin-bottom: .75rem; }
+    .tab {
+      flex: 1; padding: .5rem; border: 1px solid #333; border-radius: 10px;
+      background: #191919; color: #fff; cursor: pointer; font-weight: 700;
+    }
+    .tab.active { background: #141414; border-color: var(--brand); }
+    .tab-panel.hidden { display: none; }
+    .form-row { display: grid; gap: 6px; margin: 8px 0; }
+    .form-row input {
+      background: #0e0e0e; color: #fff; border: 1px solid #2a2a2a;
+      border-radius: 10px; padding: 10px 12px; width: 100%;
+    }
+    .form-errors { color: #ff6b6b; min-height: 1rem; margin-top: .5rem; font-size: .95rem; }
+    .link { background: none; border: none; color: var(--brand); cursor: pointer; margin-top: .5rem; }
   </style>
 </head>
 <body>
@@ -165,10 +201,71 @@
     <!-- Upload call-to-action box -->
     <section class="box fade-in delay-2" aria-label="Upload">
       <p>Ready to go? Click below to upload your Apple Music playlist file and start transferring.</p>
-      <a class="btn" href="{% url 'upload' %}">Upload a Playlist</a>
+      <!-- Trigger modal/status flow instead of linking directly -->
+      <button id="uploadBtn" class="btn">Upload a Playlist</button>
     </section>
   </main>
 
+  <!-- ---------- Auth Modal ---------- -->
+  <div id="authModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <div class="modal-card">
+      <div class="tabs">
+        <button data-tab="login"  class="tab active" aria-controls="loginForm" aria-selected="true">Log in</button>
+        <button data-tab="signup" class="tab" aria-controls="signupForm" aria-selected="false">Sign up</button>
+      </div>
+
+      <!-- LOGIN -->
+      <form id="loginForm" class="tab-panel" data-action="{% url 'login_api' %}">
+        {% csrf_token %}
+        <div class="form-row">
+          <label for="loginEmail">Email</label>
+          <input id="loginEmail" type="email" name="email" required autocomplete="email">
+        </div>
+        <div class="form-row">
+          <label for="loginPass">Password</label>
+          <input id="loginPass" type="password" name="password" required autocomplete="current-password">
+        </div>
+        <button type="submit" class="btn" style="width:100%;">Log in</button>
+        <div class="form-errors" data-for="login"></div>
+      </form>
+
+      <!-- SIGNUP -->
+      <form id="signupForm" class="tab-panel hidden" data-action="{% url 'signup_api' %}">
+        {% csrf_token %}
+        <div class="form-row">
+          <label for="suEmail">Email (must match your Spotify email)</label>
+          <input id="suEmail" type="email" name="email" required autocomplete="email">
+        </div>
+        <div class="form-row">
+          <label for="suSpotifyEmail">Spotify Email</label>
+          <input id="suSpotifyEmail" type="email" name="spotify_email" required autocomplete="email">
+        </div>
+        <div class="form-row">
+          <label for="suPass">Password</label>
+          <input id="suPass" type="password" name="password" required minlength="8" autocomplete="new-password">
+        </div>
+        <div class="form-row">
+          <label for="suPass2">Confirm Password</label>
+          <input id="suPass2" type="password" name="confirm_password" required minlength="8" autocomplete="new-password">
+        </div>
+        <button type="submit" class="btn" style="width:100%;">Create account</button>
+        <div class="form-errors" data-for="signup"></div>
+      </form>
+
+      <button id="closeAuth" class="link" type="button">Cancel</button>
+    </div>
+  </div>
+
+  <!-- ---------- Pending Modal ---------- -->
+  <div id="pendingModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pendingTitle">
+    <div class="modal-card">
+      <h3 id="pendingTitle" style="margin:0 0 8px;">Authenticating your account…</h3>
+      <p style="color:#d7d7d7;margin:0 0 12px;">This usually takes a few minutes. We’ll email you once you’re approved.</p>
+      <button id="pendingClose" class="btn" type="button" style="width:100%;">OK</button>
+    </div>
+  </div>
+
+  <!-- Starfield -->
   <script>
     // ====== Starfield + connecting lines (lightweight) ======
     (function () {
@@ -298,5 +395,8 @@
       }
     })();
   </script>
+
+  <!-- Auth modal JS (handles /auth/status, login, signup, pending modal) -->
+  <script src="{% static 'core/js/auth_modal.js' %}"></script>
 </body>
 </html>

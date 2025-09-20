@@ -15,6 +15,7 @@ from bson.objectid import ObjectId
 from services.matching_engine import match_tracks
 from .forms import LinkForm
 from .parsers import parse_apple_playlist_from_url
+from .decorators import approved_required
 
 # ---------------------------------------------------------------------
 # Debug: environment / session status
@@ -147,6 +148,7 @@ def _normalize_apple_url(raw: str) -> str:
 
 @ensure_csrf_cookie
 @never_cache
+@approved_required
 def upload_link(request):
     if request.method == 'POST':
         form = LinkForm(request.POST)

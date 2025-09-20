@@ -18,8 +18,13 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 from core import views as core_views
+from core import views_auth
 
 urlpatterns = [
+    path("auth/signup", views_auth.signup_api, name="signup_api"),
+    path("auth/login", views_auth.login_api, name="login_api"),
+    path("auth/logout", views_auth.logout_api, name="logout_api"),
+    path("auth/status", views_auth.auth_status, name="auth_status"),
     # Landing → Upload
     path("", core_views.landing, name="landing"),
     path("upload/", core_views.upload_link, name="upload"),

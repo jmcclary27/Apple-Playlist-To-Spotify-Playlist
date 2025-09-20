@@ -24,6 +24,26 @@ def split_env(name: str, default: str | None = None) -> list[str]:
         val = default or ""
     return [x.strip() for x in val.split(",") if x.strip()]
 
+AUTH_USER_MODEL = "core.User"  # from earlier step
+
+# --- Gmail SMTP ---
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = "smtp.gmail.com"
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = os.environ.get("GMAIL_USERNAME", "")         # your Gmail address
+EMAIL_HOST_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "") # 16-char app password
+
+# “From” address you want users to see (we add Reply-To too)
+DEFAULT_FROM_EMAIL = "no-reply@apple-playlist-to-spotify-playlist.onrender.com"
+SERVER_EMAIL = DEFAULT_FROM_EMAIL  # Django error emails etc.
+
+# Where admin notifications go (new signup notifications)
+AUTH_NOTIFIER_EMAIL = "no-reply@apple-playlist-to-spotify-playlist.onrender.com"
+
+# Optional: make email auth failures loud in logs
+EMAIL_FAIL_SILENTLY = False
+
 # Hosts
 ALLOWED_HOSTS = split_env("ALLOWED_HOSTS", "localhost,127.0.0.1")
 RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")  # e.g. myapp.onrender.com
@@ -160,6 +180,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.0/howto/static-files/
 
 STATIC_URL = '/static/'
+STATICFILES_DIRS = [BASE_DIR / "static",]
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 
