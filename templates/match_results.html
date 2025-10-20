@@ -349,15 +349,45 @@
     (function () {
       const btn = document.getElementById('createBtn');
       if (!btn) return;
-      btn.addEventListener('click', () => {
+
+      btn.addEventListener('click', async () => {
         const def = btn.dataset.defaultName || 'Imported from Apple Music';
         const name = window.prompt('Name your Spotify playlist:', def);
         if (!name) return;
-        const base = btn.dataset.loginUrl;
-        const job  = btn.dataset.job;
-        const next = btn.dataset.next;
-        const url = `${base}?job_id=${encodeURIComponent(job)}&next=${encodeURIComponent(next)}&playlist_name=${encodeURIComponent(name)}`;
-        window.location.href = url;
+
+        // these were already present on your button
+        const job  = btn.dataset.job;                  // your conversion job_id
+        const next = btn.dataset.next || '/done';      // optional success page
+
+        // call the new backend endpoint
+        try {
+          const res = await fetch('/api/convert', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ job_id: job, playlist_name: name })
+          });
+          if (!res.ok) {
+            const txt = await res.text();
+            alert('Failed to create playlist: ' + txt);
+            return;
+          }
+          const payload = await res.json(); // { invite_link, open_url, spotify_uri, tracks }
+
+          // Show the user the two actions
+          // 1) collaborator invite link, 2) view-only link
+          const invite = payload.invite_link;
+          const view   = payload.open_url;
+
+          if (invite) {
+            window.location.href = invite; // one tap to accept, lands in their library as collaborator
+          } else {
+            // fallback, open the playlist and explain they may need a fresh invite
+            window.location.href = view;
+          }
+        } catch (e) {
+          console.error(e);
+          alert('Unexpected error creating playlist.');
+        }
       });
     })();
   </script>
