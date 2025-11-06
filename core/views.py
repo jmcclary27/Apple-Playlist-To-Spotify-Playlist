@@ -697,6 +697,9 @@ def api_regen_invite(request, playlist_id: str):
         return JsonResponse({"invite_link": link})
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+    
+def spotify_callback(request):
+    return HttpResponse(f"code={request.GET.get('code')}, state={request.GET.get('state')}")
 
 # ---------------------------------------------------------------------
 # Legacy utilities (kept unless you confirm removal)
