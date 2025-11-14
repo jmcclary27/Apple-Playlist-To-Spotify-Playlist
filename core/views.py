@@ -46,6 +46,7 @@ def landing(request):
 # ---------------------------------------------------------------------
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SERVICE_USER_ID = os.environ.get("SPOTIFY_SERVICE_USER_ID")  # your service Spotify account user id (required)
+SERVICE_REFRESH_TOKEN = os.environ.get("SPOTIFY_REFRESH_TOKEN")
 
 def _get_user_token_from_session(request):
     token = request.session.get("spotify_access_token")
@@ -518,21 +519,34 @@ def _is_expired(doc: dict | None) -> bool:
 
 def _refresh_access_token(spotify_user_id: str) -> str:
     doc = _get_tokens(spotify_user_id)
-    if not doc or not doc.get("refresh_token"):
+
+    # Try DB refresh token first if it exists
+    refresh_token = doc.get("refresh_token") if doc else None
+
+    # If none in DB and this is the service user, fall back to env
+    if not refresh_token and spotify_user_id == SERVICE_USER_ID:
+        refresh_token = os.environ.get("SPOTIFY_REFRESH_TOKEN")
+
+    if not refresh_token:
         raise RuntimeError("No refresh token available")
+
     data = {
         "grant_type": "refresh_token",
-        "refresh_token": doc["refresh_token"],
+        "refresh_token": refresh_token,
         "client_id": os.environ["SPOTIFY_CLIENT_ID"],
         "client_secret": os.environ["SPOTIFY_CLIENT_SECRET"],
     }
     r = requests.post(SPOTIFY_TOKEN_URL, data=data, timeout=20)
     r.raise_for_status()
     payload = r.json()
+
     new_access = payload["access_token"]
-    new_refresh = payload.get("refresh_token") or doc["refresh_token"]
+    # Spotify might or might not return a new refresh token
+    new_refresh = payload.get("refresh_token") or refresh_token
+
     _save_tokens(spotify_user_id, new_access, new_refresh, payload["expires_in"])
     return new_access
+
 
 def _get_valid_access_token(spotify_user_id: str) -> str:
     doc = _get_tokens(spotify_user_id)
