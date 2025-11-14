@@ -31,7 +31,6 @@ urlpatterns = [
     path("api/match/report/<str:job_id>.csv", core_views.match_report_csv, name="match_report_csv"),  # GET CSV
 
     # Spotify OAuth
-    path("auth/spotify/login", core_views.spotify_login, name="spotify_login"),
     path("auth/spotify/callback", core_views.spotify_callback, name="spotify_callback"),
 
     # Optional utilities
