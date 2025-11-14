@@ -1,10 +1,10 @@
 # core/views.py
-import os, urllib.parse, datetime, json, time, uuid
+import os, sys, subprocess, urllib.parse, datetime, json, time, uuid
 from uuid import uuid4
 
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render, redirect
-from django.views.decorators.csrf import ensure_csrf_cookie
+from django.views.decorators.csrf import ensure_csrf_cookie, csrf_exempt
 from django.views.decorators.http import require_POST, require_GET
 from django.conf import settings
 from django.urls import reverse
@@ -18,7 +18,7 @@ from .parsers import parse_apple_playlist_from_url
 from .decorators import approved_required
 
 # ---------------------------------------------------------------------
-# Debug: environment / session status
+# Debug: environment / session status (kept)
 # ---------------------------------------------------------------------
 @require_GET
 def debug_status(request):
@@ -37,15 +37,17 @@ def debug_status(request):
     })
 
 # ---------------------------------------------------------------------
-# Landing
+# Landing (kept)
 # ---------------------------------------------------------------------
 def landing(request):
     return render(request, "landing.html")
 
 # ---------------------------------------------------------------------
-# Spotify token helpers
+# Spotify token helpers (client-credentials for matching; service account for playlist ops)
 # ---------------------------------------------------------------------
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SERVICE_USER_ID = os.environ.get("SPOTIFY_SERVICE_USER_ID")  # your service Spotify account user id (required)
+SERVICE_REFRESH_TOKEN = os.environ.get("SPOTIFY_REFRESH_TOKEN")
 
 def _get_user_token_from_session(request):
     token = request.session.get("spotify_access_token")
@@ -55,6 +57,7 @@ def _get_user_token_from_session(request):
     return None
 
 def _get_app_token(request):
+    """Client Credentials flow token – used for read-only catalog/matching calls."""
     cid = os.environ.get("SPOTIFY_CLIENT_ID")
     csec = os.environ.get("SPOTIFY_CLIENT_SECRET")
     if not (cid and csec):
@@ -86,10 +89,11 @@ def _get_app_token(request):
     return tok
 
 def _get_any_spotify_token(request):
+    # For matching we can use client credentials; user token not required anymore.
     return _get_user_token_from_session(request) or _get_app_token(request)
 
 # ---------------------------------------------------------------------
-# DB helpers
+# DB helpers (kept)
 # ---------------------------------------------------------------------
 def _db():
     from .mongo import get_db
@@ -138,7 +142,7 @@ def connect_spotify_entry(request):
         return redirect("request_access")
 
 # ---------------------------------------------------------------------
-# Upload page  ✅ robust, guarded preview, no stale state
+# Upload page (kept)
 # ---------------------------------------------------------------------
 def _normalize_apple_url(raw: str) -> str:
     raw = (raw or "").strip()
@@ -232,7 +236,7 @@ def upload_link(request):
         'preview': preview,
         'count_total': count_total,
         'filename': filename,
-        'uploaded_ok': uploaded_ok,   # only true immediately after THIS upload
+        'uploaded_ok': uploaded_ok,
         'track_count': count_total,
         'error': error_msg,
         'last_url': request.session.get("last_uploaded_url"),
@@ -245,7 +249,7 @@ def upload_link(request):
     return resp
 
 # ---------------------------------------------------------------------
-# Matching job flow
+# Matching job flow (kept)
 # ---------------------------------------------------------------------
 def _collect_ids_from_results(payload) -> list[str]:
     ids = []
@@ -261,7 +265,6 @@ def _collect_ids_from_results(payload) -> list[str]:
                     ids.append(tid)
     return ids
 
-# ---- tolerant field picker and normalizer for parser outputs ----
 def _pick(d: dict, *candidates, sep: str | None = None) -> str:
     for k in candidates:
         if k in d and d[k] is not None:
@@ -293,7 +296,6 @@ def _shrink_track(t: dict) -> dict:
             except Exception:
                 dur_sec = None
 
-    # pass normalized fields through if present
     norm_title  = _pick(t, "norm_title")
     norm_artist = _pick(t, "norm_artist")
 
@@ -303,7 +305,6 @@ def _shrink_track(t: dict) -> dict:
         "raw_album": album,
         "raw_isrc": isrc or None,
         "duration_sec": dur_sec,
-        # aliases some matchers expect
         "title": title,
         "artist": artist,
         "album": album,
@@ -331,7 +332,6 @@ def match_start(request):
     apple_tracks = [_shrink_track(t) for t in rows]
     total = len(apple_tracks)
 
-    # sanity: if many tracks are missing core fields, bail early with a clear error
     missing_core = sum(1 for r in apple_tracks if not r["raw_title"] or not r["raw_artist"])
     if missing_core > max(2, int(0.5 * total)):
         return JsonResponse({
@@ -454,7 +454,7 @@ def match_run(request, job_id: str):
     })
 
 # ---------------------------------------------------------------------
-# Pages
+# Pages (kept)
 # ---------------------------------------------------------------------
 @require_GET
 @never_cache
@@ -521,55 +521,8 @@ def match_report_csv(request, job_id: str):
     return resp
 
 # ---------------------------------------------------------------------
-# OAuth + playlist creation (via callback)
+# Service account token + API helpers (NEW)
 # ---------------------------------------------------------------------
-def _json_error(message: str, status=400):
-    return JsonResponse({"error": message}, status=status)
-
-def spotify_login(request):
-    state = uuid.uuid4().hex
-    request.session["spotify_oauth_state"] = state
-
-    job_id = request.GET.get("job_id")
-    next_url = request.GET.get("next") or "/"
-    playlist_name = request.GET.get("playlist_name")
-    request.session["oauth_ctx"] = {"job_id": job_id, "next": next_url, "playlist_name": playlist_name}
-    request.session.modified = True
-
-    client_id = os.environ.get("SPOTIFY_CLIENT_ID")
-    redirect_uri = os.environ.get("SPOTIFY_REDIRECT_URI")
-    scopes = os.environ.get("SPOTIFY_SCOPES", "playlist-modify-public playlist-modify-private user-read-email")
-
-    missing = [k for k, v in {
-        "SPOTIFY_CLIENT_ID": client_id,
-        "SPOTIFY_REDIRECT_URI": redirect_uri
-    }.items() if not v]
-    if missing:
-        return HttpResponse(f"Missing required env var(s): {', '.join(missing)}", status=500)
-
-    params = {
-        "client_id": client_id,
-        "response_type": "code",
-        "redirect_uri": redirect_uri,
-        "scope": scopes,
-        "state": state,
-        "show_dialog": "false",
-    }
-    url = "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode(params)
-    return redirect(url)
-
-def _spotify_token_exchange(code: str):
-    data = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": os.environ["SPOTIFY_REDIRECT_URI"],
-        "client_id": os.environ["SPOTIFY_CLIENT_ID"],
-        "client_secret": os.environ["SPOTIFY_CLIENT_SECRET"],
-    }
-    r = requests.post("https://accounts.spotify.com/api/token", data=data, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
 def _now_ts(): return int(time.time())
 _EXP_BUFFER = 60
 
@@ -594,21 +547,34 @@ def _is_expired(doc: dict | None) -> bool:
 
 def _refresh_access_token(spotify_user_id: str) -> str:
     doc = _get_tokens(spotify_user_id)
-    if not doc or not doc.get("refresh_token"):
+
+    # Try DB refresh token first if it exists
+    refresh_token = doc.get("refresh_token") if doc else None
+
+    # If none in DB and this is the service user, fall back to env
+    if not refresh_token and spotify_user_id == SERVICE_USER_ID:
+        refresh_token = os.environ.get("SPOTIFY_REFRESH_TOKEN")
+
+    if not refresh_token:
         raise RuntimeError("No refresh token available")
+
     data = {
         "grant_type": "refresh_token",
-        "refresh_token": doc["refresh_token"],
+        "refresh_token": refresh_token,
         "client_id": os.environ["SPOTIFY_CLIENT_ID"],
         "client_secret": os.environ["SPOTIFY_CLIENT_SECRET"],
     }
-    r = requests.post("https://accounts.spotify.com/api/token", data=data, timeout=20)
+    r = requests.post(SPOTIFY_TOKEN_URL, data=data, timeout=20)
     r.raise_for_status()
     payload = r.json()
+
     new_access = payload["access_token"]
-    new_refresh = payload.get("refresh_token") or doc["refresh_token"]
+    # Spotify might or might not return a new refresh token
+    new_refresh = payload.get("refresh_token") or refresh_token
+
     _save_tokens(spotify_user_id, new_access, new_refresh, payload["expires_in"])
     return new_access
+
 
 def _get_valid_access_token(spotify_user_id: str) -> str:
     doc = _get_tokens(spotify_user_id)
@@ -616,95 +582,169 @@ def _get_valid_access_token(spotify_user_id: str) -> str:
         return _refresh_access_token(spotify_user_id)
     return doc["access_token"]
 
-def _spotify_api(spotify_user_id: str, method: str, path: str, **kwargs):
+def spotify_service_api(method: str, path: str, **kwargs):
+    """Spotify Web API call using the SERVICE_USER_ID's access token."""
+    if not SERVICE_USER_ID:
+        raise RuntimeError("Missing SPOTIFY_SERVICE_USER_ID")
     base = "https://api.spotify.com/v1"
-    token = _get_valid_access_token(spotify_user_id)
+    token = _get_valid_access_token(SERVICE_USER_ID)
     headers = kwargs.pop("headers", {})
     headers["Authorization"] = f"Bearer {token}"
     r = requests.request(method, base + path, headers=headers, timeout=20, **kwargs)
     if r.status_code == 401:
-        token = _refresh_access_token(spotify_user_id)
+        token = _refresh_access_token(SERVICE_USER_ID)
         headers["Authorization"] = f"Bearer {token}"
         r = requests.request(method, base + path, headers=headers, timeout=20, **kwargs)
     r.raise_for_status()
     return r.json() if r.content else {}
 
-def _spotify_me(access_token: str):
-    r = requests.get("https://api.spotify.com/v1/me",
-                     headers={"Authorization": f"Bearer {access_token}"}, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-def spotify_callback(request):
-    if "error" in request.GET:
-        return HttpResponse(f"Spotify returned error: {request.GET.get('error')}", status=400)
-
-    code = request.GET.get("code")
-    state = request.GET.get("state")
-    if not code or not state or state != request.session.get("spotify_oauth_state"):
-        return HttpResponse("State mismatch or missing code.", status=400)
-
-    tok = _spotify_token_exchange(code)
-    at = tok["access_token"]
-    me = _spotify_me(at)
-    user_id = me["id"]
-    request.session["spotify_user_id"] = user_id
-    _save_tokens(user_id, at, tok.get("refresh_token"), tok["expires_in"])
-
-    ctx = request.session.pop("oauth_ctx", {}) or {}
-    job_id = ctx.get("job_id")
-    next_url = ctx.get("next") or "/"
-    chosen_name = ctx.get("playlist_name")
-
-    if job_id:
-        job = _jobs_col().find_one({"_id": job_id})
-        if not job:
-            return redirect(next_url)
-
-        matched_ids = job.get("matched_ids") or _collect_ids_from_results({"results": job.get("results") or []})
-        name = (chosen_name or job.get("source_name") or "Imported from Apple Music")[:100]
-
-        r = requests.post(
-            f"https://api.spotify.com/v1/users/{user_id}/playlists",
-            headers={"Authorization": f"Bearer {at}", "Content-Type": "application/json"},
-            json={"name": name, "public": False, "description": "Imported via Apple→Spotify"},
-            timeout=20,
-        )
-        r.raise_for_status()
-        playlist = r.json()
-        playlist_id = playlist["id"]
-        playlist_url = playlist.get("external_urls", {}).get("spotify", "")
-
-        if matched_ids:
-            add_url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
-            headers = {"Authorization": f"Bearer {at}", "Content-Type": "application/json"}
-            for i in range(0, len(matched_ids), 100):
-                chunk = matched_ids[i:i+100]
-                rr = requests.post(add_url, headers=headers, json={"uris": [f"spotify:track:{tid}" for tid in chunk]}, timeout=25)
-                if rr.status_code == 429:
-                    time.sleep(int(rr.headers.get("Retry-After", "1")))
-                    rr = requests.post(add_url, headers=headers, json={"uris": [f"spotify:track:{tid}" for tid in chunk]}, timeout=25)
-                rr.raise_for_status()
-
-        _conversions_col().insert_one({
-            "created_at": datetime.datetime.utcnow(),
-            "spotify_user_id": user_id,
-            "playlist_name": name,
-            "spotify_playlist_id": playlist_id,
-            "spotify_playlist_url": playlist_url,
-            "total": len(matched_ids),
-            "matched": len(matched_ids),
-            "unmatched": 0,
-            "source": f"job:{job_id}",
-        })
-
-        sep = "&" if "?" in next_url else "?"
-        return redirect(f"{next_url}{sep}created=1&playlist_url={urllib.parse.quote(playlist_url)}")
-
-    return redirect("/me")
+# ---------------------------------------------------------------------
+# Invite-bot bridge (NEW) — calls tools/spotify_invite_bot.py
+# ---------------------------------------------------------------------
+def _mint_collaborator_invite_link(playlist_id: str) -> str:
+    """
+    Runs a Playwright-based helper that:
+      - opens https://open.spotify.com/playlist/{id} as the service account
+      - clicks "More" → "Invite collaborators" → "Copy link"
+      - prints link to stdout
+    """
+    cmd = [sys.executable, 'tools/spotify_invite_bot.py', playlist_id]
+    run = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    if run.returncode != 0:
+        raise RuntimeError(f"invite bot failed: {run.stderr.decode('utf-8', 'ignore')}")
+    link = run.stdout.decode('utf-8').strip()
+    if not (link.startswith("http://") or link.startswith("https://")):
+        raise RuntimeError("No invite link returned")
+    return link
 
 # ---------------------------------------------------------------------
-# Legacy utilities
+# Convert API: create playlist under service account, make collaborative, add tracks, mint invite (NEW)
+# ---------------------------------------------------------------------
+@csrf_exempt
+def api_convert(request):
+    """
+    POST { job_id, playlist_name? }
+    Returns: { invite_link, open_url, spotify_uri, tracks }
+    """
+    if request.method != "POST":
+        return HttpResponse(status=405)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except Exception:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    job_id = payload.get("job_id")
+    playlist_name = (payload.get("playlist_name") or "Imported from Apple Music")[:100]
+
+    if not job_id:
+        return JsonResponse({"error": "Missing job_id"}, status=400)
+
+    job = _jobs_col().find_one({"_id": job_id})
+    if not job:
+        return JsonResponse({"error": "Job not found"}, status=404)
+
+    matched_ids = job.get("matched_ids") or _collect_ids_from_results({"results": job.get("results") or []})
+    tracks_total = len(matched_ids)
+
+    # 1) Create playlist under service account
+    pl = spotify_service_api(
+        "POST",
+        f"/users/{SERVICE_USER_ID}/playlists",
+        headers={"Content-Type": "application/json"},
+        json={
+            "name": playlist_name,
+            "public": False,
+            "description": "Imported via Apple→Spotify",
+        },
+    )
+    playlist_id = pl["id"]
+    playlist_url = pl.get("external_urls", {}).get("spotify", "")
+    playlist_uri = f"spotify:playlist:{playlist_id}"
+
+    # 2) Private + collaborative
+    spotify_service_api(
+        "PUT",
+        f"/playlists/{playlist_id}",
+        headers={"Content-Type": "application/json"},
+        json={"collaborative": True, "public": False},
+    )
+
+    # 3) Add tracks in chunks of 100
+    if matched_ids:
+        add_path = f"/playlists/{playlist_id}/tracks"
+        for i in range(0, len(matched_ids), 100):
+            chunk = matched_ids[i:i+100]
+            try:
+                spotify_service_api(
+                    "POST",
+                    add_path,
+                    headers={"Content-Type": "application/json"},
+                    json={"uris": [f"spotify:track:{tid}" for tid in chunk]},
+                )
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 429:
+                    wait = int(e.response.headers.get("Retry-After", "1"))
+                    time.sleep(wait)
+                    spotify_service_api(
+                        "POST",
+                        add_path,
+                        headers={"Content-Type": "application/json"},
+                        json={"uris": [f"spotify:track:{tid}" for tid in chunk]},
+                    )
+                else:
+                    raise
+
+    # 4) Mint invite link (best effort)
+    invite_link = ""
+    try:
+        invite_link = _mint_collaborator_invite_link(playlist_id)
+    except Exception:
+        invite_link = ""  # still return view-only link
+
+    # 5) Persist conversion record
+    _conversions_col().insert_one({
+        "created_at": datetime.datetime.utcnow(),
+        "service_spotify_user_id": SERVICE_USER_ID,
+        "playlist_name": playlist_name,
+        "spotify_playlist_id": playlist_id,
+        "spotify_playlist_url": playlist_url,
+        "total": tracks_total,
+        "matched": tracks_total,
+        "unmatched": 0,
+        "source": f"job:{job_id}",
+        "invite_link": invite_link,
+        "invite_generated_at": datetime.datetime.utcnow() if invite_link else None,
+    })
+
+    return JsonResponse({
+        "invite_link": invite_link,
+        "open_url": playlist_url,
+        "spotify_uri": playlist_uri,
+        "tracks": tracks_total,
+    })
+
+# ---------------------------------------------------------------------
+# Regenerate invite (NEW)
+# ---------------------------------------------------------------------
+@csrf_exempt
+@require_POST
+def api_regen_invite(request, playlist_id: str):
+    try:
+        link = _mint_collaborator_invite_link(playlist_id)
+        _conversions_col().update_one(
+            {"spotify_playlist_id": playlist_id},
+            {"$set": {"invite_link": link, "invite_generated_at": datetime.datetime.utcnow()}}
+        )
+        return JsonResponse({"invite_link": link})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+    
+def spotify_callback(request):
+    return HttpResponse(f"code={request.GET.get('code')}, state={request.GET.get('state')}")
+
+# ---------------------------------------------------------------------
+# Legacy utilities (kept unless you confirm removal)
 # ---------------------------------------------------------------------
 def conversion_detail(request, cid: str):
     conv = _conversions_col().find_one({"_id": ObjectId(cid)})
@@ -732,10 +772,14 @@ def conversion_detail(request, cid: str):
     return HttpResponse(html)
 
 def me(request):
+    """
+    Legacy: requires a per-user token in session. Kept for now; safe to remove later
+    once you confirm nothing calls this.
+    """
     spotify_user_id = request.session.get("spotify_user_id")
     if not spotify_user_id:
         return HttpResponse("Not logged in.", status=401)
-    profile = _spotify_api(spotify_user_id, "GET", "/me")
+    profile = spotify_service_api("GET", "/me")  # uses service token; changed from per-user
     return HttpResponse(json.dumps({
         "id": profile.get("id"),
         "display_name": profile.get("display_name"),
