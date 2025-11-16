@@ -142,7 +142,7 @@ def connect_spotify_entry(request):
         return redirect("request_access")
 
 # ---------------------------------------------------------------------
-# Upload page (kept)
+# Upload page (NO login/approval required)
 # ---------------------------------------------------------------------
 def _normalize_apple_url(raw: str) -> str:
     raw = (raw or "").strip()
@@ -152,8 +152,7 @@ def _normalize_apple_url(raw: str) -> str:
 
 @ensure_csrf_cookie
 @never_cache
-@approved_required
-def upload_link(request):
+def upload_link(request):  # 👈 removed @approved_required
     if request.method == 'POST':
         form = LinkForm(request.POST)
         if not form.is_valid():
@@ -202,6 +201,7 @@ def upload_link(request):
 
         for k in ("matched_spotify_ids", "matched_scope", "matched_summary"):
             request.session.pop(k, None)
+
         request.session["upload_guard"] = token
         request.session["last_uploaded_url"] = url
         request.session["last_parsed_count"] = len(rows)
