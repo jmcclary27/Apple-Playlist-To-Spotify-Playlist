@@ -18,7 +18,6 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 from core import views as core_views
-from core import views_auth
 
 urlpatterns = [
     # Landing → Upload
