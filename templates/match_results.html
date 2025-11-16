@@ -92,6 +92,7 @@
       font-weight:700;
       box-shadow:0 10px 25px rgba(29,185,84,.25);
       transition: transform .15s ease, background .15s ease, box-shadow .15s ease;
+      display:inline-block;
     }
     .btn:hover{ background:var(--accent-2); transform:translateY(-1px) scale(1.02); }
     .btn[disabled]{ opacity:.55; cursor:not-allowed; transform:none; box-shadow:none; }
@@ -143,8 +144,11 @@
   <main>
     <section class="panel">
       {% if created %}
-        <p class="ok">✅ Playlist created!
-          <a class="inline" href="{{ playlist_url }}" target="_blank" rel="noopener">Open in Spotify</a>
+        <p class="ok">
+          ✅ Playlist created!
+          {% if playlist_url %}
+            <a class="inline" href="{{ playlist_url }}" target="_blank" rel="noopener">Open in Spotify</a>
+          {% endif %}
         </p>
       {% endif %}
 
@@ -164,14 +168,15 @@
           Download CSV report
         </button>
 
-        <!-- Create Playlist: prompt for name, then redirect to OAuth with params -->
-        <button id="createBtn" class="btn" type="button"
-                data-login-url="{% url 'spotify_login' %}"
-                data-job="{{ job_id }}"
-                data-next="{{ request.path|urlencode }}"
-                data-default-name="{{ source_name|default:'Imported from Apple Music' }}">
-          Create Spotify Playlist
-        </button>
+        <!-- Join playlist as collaborator (Spotify handles everything) -->
+        {% if playlist_invite_url %}
+          <a class="btn"
+             href="{{ playlist_invite_url }}"
+             target="_blank"
+             rel="noopener">
+            Join this playlist on Spotify
+          </a>
+        {% endif %}
 
         <span class="muted">Scroll to review; unmatched are highlighted.</span>
       </div>
@@ -196,7 +201,7 @@
     </section>
   </main>
 
-  <!-- Starfield background (your exact script) -->
+  <!-- Starfield background (unchanged) -->
   <script>
     // ====== Starfield + connecting lines (lightweight) ======
     (function () {
@@ -284,15 +289,11 @@
           grad.addColorStop(0, `rgba(255,255,255,${0.6 * glow})`);
           grad.addColorStop(1, 'rgba(255,255,255,0)');
           ctx.fillStyle = grad;
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.r * 4, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 4, 0, Math.PI * 2); ctx.fill();
 
           // core
           ctx.fillStyle = `rgba(255,255,255,${0.95 * glow})`;
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
         }
 
         requestAnimationFrame(frame);
@@ -328,7 +329,7 @@
   </script>
 
   <script>
-    // CSV: trigger exactly once per click; optional re-enable after a short delay
+    // CSV download button
     (function () {
       const btn = document.getElementById('csvBtn');
       if (!btn) return;
@@ -342,52 +343,6 @@
         a.click();
         a.remove();
         setTimeout(() => { btn.disabled = false; }, 4000);
-      });
-    })();
-
-    // Create playlist: prompt for name, then redirect to Spotify OAuth
-    (function () {
-      const btn = document.getElementById('createBtn');
-      if (!btn) return;
-
-      btn.addEventListener('click', async () => {
-        const def = btn.dataset.defaultName || 'Imported from Apple Music';
-        const name = window.prompt('Name your Spotify playlist:', def);
-        if (!name) return;
-
-        // these were already present on your button
-        const job  = btn.dataset.job;                  // your conversion job_id
-        const next = btn.dataset.next || '/done';      // optional success page
-
-        // call the new backend endpoint
-        try {
-          const res = await fetch('/api/convert', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ job_id: job, playlist_name: name })
-          });
-          if (!res.ok) {
-            const txt = await res.text();
-            alert('Failed to create playlist: ' + txt);
-            return;
-          }
-          const payload = await res.json(); // { invite_link, open_url, spotify_uri, tracks }
-
-          // Show the user the two actions
-          // 1) collaborator invite link, 2) view-only link
-          const invite = payload.invite_link;
-          const view   = payload.open_url;
-
-          if (invite) {
-            window.location.href = invite; // one tap to accept, lands in their library as collaborator
-          } else {
-            // fallback, open the playlist and explain they may need a fresh invite
-            window.location.href = view;
-          }
-        } catch (e) {
-          console.error(e);
-          alert('Unexpected error creating playlist.');
-        }
       });
     })();
   </script>
