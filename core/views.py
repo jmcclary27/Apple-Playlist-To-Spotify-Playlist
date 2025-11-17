@@ -478,11 +478,10 @@ def match_results_page(request, job_id: str):
     status = job.get("status") or ("done" if done >= total and total > 0 else "running")
 
     if status != "done" or done < total:
-        return redirect("match_progress", job_id=job_id)
+        return redirect("match_progress_page", job_id=job_id)
 
     results = job.get("results") or []
     summary = job.get("summary") or {"matched": 0, "fuzzy_matched": 0, "not_found": 0}
-    created_flag = request.GET.get("created")
     playlist_url = request.GET.get("playlist_url", "")
 
     resp = render(request, "match_results.html", {
@@ -490,7 +489,7 @@ def match_results_page(request, job_id: str):
         "results": results,
         "summary": summary,
         "source_name": job.get("source_name") or "Imported from Apple Music",
-        "created": (created_flag == "1"),
+        "created": bool(playlist_url),
         "playlist_url": playlist_url,
     })
     resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
