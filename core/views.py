@@ -248,6 +248,123 @@ def upload_link(request):  # 👈 removed @approved_required
     resp["Vary"] = "Cookie"
     return resp
 
+@csrf_exempt
+def api_convert(request):
+    """
+    POST { job_id, playlist_name? }
+    Returns: { invite_link, open_url, spotify_uri, tracks }
+    """
+    if request.method != "POST":
+        return HttpResponse(status=405)
+
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except Exception:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    job_id = payload.get("job_id")
+    playlist_name = (payload.get("playlist_name") or "Imported from Apple Music")[:100]
+
+    if not job_id:
+        return JsonResponse({"error": "Missing job_id"}, status=400)
+
+    job = _jobs_col().find_one({"_id": job_id})
+    if not job:
+        return JsonResponse({"error": "Job not found"}, status=404)
+
+    matched_ids = job.get("matched_ids") or _collect_ids_from_results({"results": job.get("results") or []})
+    tracks_total = len(matched_ids)
+
+    # 1) Create playlist under service account
+    pl = spotify_service_api(
+        "POST",
+        f"/users/{SERVICE_USER_ID}/playlists",
+        headers={"Content-Type": "application/json"},
+        json={
+            "name": playlist_name,
+            "public": False,
+            "description": "Imported via Apple→Spotify",
+        },
+    )
+    playlist_id = pl["id"]
+    playlist_url = pl.get("external_urls", {}).get("spotify", "")
+    playlist_uri = f"spotify:playlist:{playlist_id}"
+
+    # 2) Private + collaborative
+    spotify_service_api(
+        "PUT",
+        f"/playlists/{playlist_id}",
+        headers={"Content-Type": "application/json"},
+        json={"collaborative": True, "public": False},
+    )
+
+    # 3) Add tracks in chunks of 100
+    if matched_ids:
+        add_path = f"/playlists/{playlist_id}/tracks"
+        for i in range(0, len(matched_ids), 100):
+            chunk = matched_ids[i:i+100]
+            try:
+                spotify_service_api(
+                    "POST",
+                    add_path,
+                    headers={"Content-Type": "application/json"},
+                    json={"uris": [f"spotify:track:{tid}" for tid in chunk]},
+                )
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code == 429:
+                    wait = int(e.response.headers.get("Retry-After", "1"))
+                    time.sleep(wait)
+                    spotify_service_api(
+                        "POST",
+                        add_path,
+                        headers={"Content-Type": "application/json"},
+                        json={"uris": [f"spotify:track:{tid}" for tid in chunk]},
+                    )
+                else:
+                    raise
+
+    # 4) Mint invite link (best effort)
+    invite_link = ""
+    try:
+        invite_link = _mint_collaborator_invite_link(playlist_id)
+    except Exception:
+        invite_link = ""  # still return view-only link
+
+    # 5) Persist conversion record
+    _conversions_col().insert_one({
+        "created_at": datetime.datetime.utcnow(),
+        "service_spotify_user_id": SERVICE_USER_ID,
+        "playlist_name": playlist_name,
+        "spotify_playlist_id": playlist_id,
+        "spotify_playlist_url": playlist_url,
+        "total": tracks_total,
+        "matched": tracks_total,
+        "unmatched": 0,
+        "source": f"job:{job_id}",
+        "invite_link": invite_link,
+        "invite_generated_at": datetime.datetime.utcnow() if invite_link else None,
+    })
+
+    # 6) ALSO persist playlist URL on the job so match_results_page can show the button
+    _jobs_col().update_one(
+        {"_id": job_id},
+        {"$set": {
+            # use the collaborator invite link if available, otherwise fall back
+            "playlist_url": invite_link or playlist_url,
+            "open_url": playlist_url,
+            "spotify_playlist_id": playlist_id,
+            "invite_link": invite_link,
+            "playlist_created_at": datetime.datetime.utcnow(),
+        }}
+    )
+
+    return JsonResponse({
+        "invite_link": invite_link,
+        "open_url": playlist_url,
+        "spotify_uri": playlist_uri,
+        "tracks": tracks_total,
+    })
+
 # ---------------------------------------------------------------------
 # Matching job flow (kept)
 # ---------------------------------------------------------------------
