@@ -482,7 +482,13 @@ def match_results_page(request, job_id: str):
 
     results = job.get("results") or []
     summary = job.get("summary") or {"matched": 0, "fuzzy_matched": 0, "not_found": 0}
-    playlist_url = request.GET.get("playlist_url", "")
+
+    # Prefer playlist_url stored on the job; fall back to querystring for backward compat
+    playlist_url = (
+        job.get("playlist_url")
+        or job.get("open_url")
+        or request.GET.get("playlist_url", "")
+    )
 
     resp = render(request, "match_results.html", {
         "job_id": job_id,
@@ -715,6 +721,19 @@ def api_convert(request):
         "invite_link": invite_link,
         "invite_generated_at": datetime.datetime.utcnow() if invite_link else None,
     })
+
+    # 6) ALSO persist playlist URL on the job so match_results_page can show the button
+    _jobs_col().update_one(
+        {"_id": job_id},
+        {"$set": {
+            # use the collaborator invite link if available, otherwise fall back
+            "playlist_url": invite_link or playlist_url,
+            "open_url": playlist_url,
+            "spotify_playlist_id": playlist_id,
+            "invite_link": invite_link,
+            "playlist_created_at": datetime.datetime.utcnow(),
+        }}
+    )
 
     return JsonResponse({
         "invite_link": invite_link,
