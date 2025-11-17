@@ -24,6 +24,7 @@ from services.matching_engine import match_tracks
 from .decorators import approved_required
 from .forms import LinkForm
 from .models import SpotifyAccessRequest
+from .parsers import parse_apple_playlist_from_url
 
 # ---------------------------------------------------------------------
 # Debug: environment / session status
