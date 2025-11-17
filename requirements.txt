@@ -22,3 +22,5 @@ beautifulsoup4>=4.12
 
 # --- Searching Spotify ---
 rapidfuzz
+
+playwright>=1.45.0
