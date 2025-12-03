@@ -99,6 +99,7 @@
       display: flex;
       flex-direction: column;
       gap: .6rem;
+      align-items: flex-start;
     }
 
     /* Row that holds ONLY the two buttons */
@@ -106,6 +107,7 @@
       display: flex;
       gap: .6rem;
       align-items: stretch; /* same height */
+      justify-content: flex-start;
     }
 
     /* Make both buttons the same width + centered text */
@@ -126,7 +128,7 @@
     }
 
     .row{ display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
-    .muted{ color:var(--muted); }
+    .muted{ color:var(--muted); align-items: center; }
     .ok{ color:var(--ok); }
     .warn{ color:var(--warn); }
 
@@ -205,24 +207,6 @@
         </div>
       </div>
 
-      {% if playlist_url %}
-        <section class="instructions-block"
-                 aria-label="Important instructions to own your playlist">
-          <h2>
-            Important instructions to own your playlist
-          </h2>
-          <p>
-            After clicking the "Join this playlist on Spotify" button, make sure to
-            save the playlist to your library by clicking the three dots in spotify and
-            selecting "Save to Your Library". THIS ALONE WILL NOT GIVE YOU OWNERSHIP OF THE PLAYLIST.
-            Spotify has updated so you cannot create a playlist from another playlist in the web browser.
-            To fully own the playlist, you need to open the Spotify desktop or mobile app, click the three dots
-            on the playlist that is now in your library, and select "Add to other playlist" and then select a 
-            current playlist you have or a new playlist. Now you will have full ownership of your playlist!
-          </p>
-        </section>
-      {% endif %}
-
       <div class="toolbar">
         <div class="toolbar-buttons">
           {% if playlist_url %}
@@ -241,8 +225,23 @@
           </button>
         </div>
 
-        <span class="muted">Scroll to review; unmatched are highlighted.</span>
-      </div>
+      {% if playlist_url %}
+        <section class="instructions-block"
+                 aria-label="Important instructions to own your playlist">
+          <h2>
+            Important instructions to own your playlist
+          </h2>
+          <p>
+            After clicking the "Join this playlist on Spotify" button, make sure to
+            save the playlist to your library by clicking the three dots in spotify and
+            selecting "Save to Your Library". THIS ALONE WILL NOT GIVE YOU OWNERSHIP OF THE PLAYLIST.
+            Spotify has updated so you cannot create a playlist from another playlist in the web browser.
+            To fully own the playlist, you need to open the Spotify desktop or mobile app, click the three dots
+            on the playlist that is now in your library, and select "Add to other playlist" and then select a 
+            current playlist you have or a new playlist. Now you will have full ownership of your playlist!
+          </p>
+        </section>
+      {% endif %}
 
         <span class="muted">Scroll to review; unmatched are highlighted.</span>
       </div>
