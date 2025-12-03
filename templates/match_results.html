@@ -99,7 +99,8 @@
       display: flex;
       flex-direction: column;
       gap: .6rem;
-      align-items: flex-start;
+      justify-content: left;
+      align-items: left;
     }
 
     /* Row that holds ONLY the two buttons */
@@ -207,24 +208,6 @@
         </div>
       </div>
 
-      <div class="toolbar">
-        <div class="toolbar-buttons">
-          {% if playlist_url %}
-            <a class="btn"
-               href="{{ playlist_url }}"
-               target="_blank"
-               rel="noopener">
-              Join this playlist on Spotify
-            </a>
-          {% endif %}
-
-          <!-- One-click CSV download -->
-          <button id="csvBtn" class="btn" type="button"
-                  data-url="{% url 'match_report_csv' job_id=job_id %}">
-            Download CSV report
-          </button>
-        </div>
-
       {% if playlist_url %}
         <section class="instructions-block"
                  aria-label="Important instructions to own your playlist">
@@ -242,6 +225,24 @@
           </p>
         </section>
       {% endif %}
+
+      <div class="toolbar">
+        <div class="toolbar-buttons">
+          {% if playlist_url %}
+            <a class="btn"
+               href="{{ playlist_url }}"
+               target="_blank"
+               rel="noopener">
+              Join this playlist on Spotify
+            </a>
+          {% endif %}
+
+          <!-- One-click CSV download -->
+          <button id="csvBtn" class="btn" type="button"
+                  data-url="{% url 'match_report_csv' job_id=job_id %}">
+            Download CSV report
+          </button>
+        </div>
 
         <span class="muted">Scroll to review; unmatched are highlighted.</span>
       </div>
