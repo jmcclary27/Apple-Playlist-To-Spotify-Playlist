@@ -143,14 +143,6 @@
 
   <main>
     <section class="panel">
-      {% if created %}
-        <p class="ok">
-          ✅ Playlist created!
-          {% if playlist_url %}
-            <a class="inline" href="{{ playlist_url }}" target="_blank" rel="noopener">Open in Spotify</a>
-          {% endif %}
-        </p>
-      {% endif %}
 
       <div class="row" role="status" aria-live="polite">
         <div><strong>Total:</strong> {{ summary.total|default:results|length }}</div>
@@ -161,14 +153,26 @@
         </div>
       </div>
 
-      <div class="toolbar">
-        <!-- One-click CSV download -->
-        <button id="csvBtn" class="btn" type="button"
-                data-url="{% url 'match_report_csv' job_id=job_id %}">
-          Download CSV report
-        </button>
+      {% if playlist_url %}
+        <section class="instructions-block"
+                aria-label="Important instructions to own your playlist"
+                style="margin-top:1.5rem;">
+          <h2 style="margin:0 0 .5rem; font-size:1.35rem; font-weight:800;">
+            Important instructions to own your playlist
+          </h2>
+          <p class="muted" style="max-width:640px; line-height:1.5;">
+            After clicking the "Join this playlist on Spotify" button, make sure to
+            save the playlist to your library by clicking the three dots in spotify and
+            selecting "Save to Your Library". THIS ALONE WILL NOT GIVE YOU OWNERSHIP OF THE PLAYLIST.
+            Spotify has updated so you cannot create a playlist from another playlist in the web browser.
+            To fully own the playlist, you need to open the Spotify desktop or mobile app, click the three dots
+            on the playlist that is now in your library, and select "Add to other playlist" and then select a 
+            current playlist you have or a new playlist. Now you will have full ownership of your playlist!
+          </p>
+        </section>
+      {% endif %}
 
-        <!-- Join playlist as collaborator (Spotify handles everything) -->
+      <div class="toolbar">
         {% if playlist_url %}
           <a class="btn"
              href="{{ playlist_url }}"
@@ -177,6 +181,12 @@
             Join this playlist on Spotify
           </a>
         {% endif %}
+
+        <!-- One-click CSV download -->
+        <button id="csvBtn" class="btn" type="button"
+                data-url="{% url 'match_report_csv' job_id=job_id %}">
+          Download CSV report
+        </button>
 
         <span class="muted">Scroll to review; unmatched are highlighted.</span>
       </div>

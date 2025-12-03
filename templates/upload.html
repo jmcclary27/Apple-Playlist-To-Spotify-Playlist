@@ -227,9 +227,20 @@
 
         <p><strong>{{ track_count }}</strong> tracks parsed and cached.</p>
 
-        <!-- Match button → starts a job, then redirects to progress page -->
+        <!-- Match button and optional playlist title -->
         <form id="startMatch" method="post" action="{% url 'match_start' %}">
           {% csrf_token %}
+          <label for="playlist_title">Playlist title (optional)</label>
+          <input
+            type="text"
+            id="playlist_title"
+            name="playlist_title"
+            placeholder="{{ filename }} (Spotify)"
+          />
+          <span class="muted" style="display:block; margin:.3rem 0 .9rem;">
+            If you leave this blank, we will pick a default name when creating the playlist on Spotify.
+          </span>
+
           <button type="submit">Match Playlist</button>
           <span class="muted" style="margin-left:.5rem;">You’ll see a progress screen while we match.</span>
         </form>
@@ -368,7 +379,7 @@
     })();
   </script>
 
-  <!-- Start match: simple POST via fetch, no login checks -->
+  <!-- Start match: POST form data including optional playlist title -->
   <script>
     function getCookie(name) {
       const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
@@ -382,12 +393,14 @@
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
         const url = form.getAttribute('action');
+        const formData = new FormData(form);
 
         try {
           const resp = await fetch(url, {
             method: 'POST',
             credentials: 'same-origin',
-            headers: { 'X-CSRFToken': getCookie('csrftoken') }
+            headers: { 'X-CSRFToken': getCookie('csrftoken') },
+            body: formData
           });
 
           if (!resp.ok) {

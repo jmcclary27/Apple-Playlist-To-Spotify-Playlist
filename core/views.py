@@ -360,6 +360,22 @@ def match_start(request):
     if not isinstance(rows, list) or not rows:
         return JsonResponse({"error": "No uploaded tracks. Please upload first."}, status=400)
 
+    # 👇 NEW: get optional title from the form
+    raw_title = (request.POST.get("playlist_title") or "").strip()
+    if raw_title:
+        source_name = raw_title
+        # keep session + uploads doc in sync (optional but nice)
+        request.session["playlist_name"] = source_name
+        request.session.modified = True
+        if doc:
+            _uploads_col().update_one(
+                {"_id": token},
+                {"$set": {"playlist_name": source_name}},
+            )
+    else:
+        # fall back to whatever we already had
+        source_name = request.session.get("playlist_name") or "Imported from Apple Music"
+
     job_id = uuid4().hex
     now = datetime.datetime.utcnow()
 
@@ -385,7 +401,8 @@ def match_start(request):
         "results": [],
         "summary": {"matched": 0, "fuzzy_matched": 0, "not_found": 0},
         "matched_ids": [],
-        "source_name": request.session.get("playlist_name") or "Imported from Apple Music",
+        # 👇 use the resolved name here
+        "source_name": source_name,
     })
 
     resp = JsonResponse({"job_id": job_id})

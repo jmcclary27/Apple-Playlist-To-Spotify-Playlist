@@ -4,6 +4,7 @@ import sys
 import json
 import time
 from pathlib import Path
+import re
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -37,117 +38,119 @@ def require_env(var_name: str) -> str:
     return value
 
 
-def login_if_needed(page, context):
+def login_with_service_account(page, context):
     """
-    If we're on a login page, fill in username/password and save auth state.
+    Always log in as the service account on the accounts.spotify.com login page.
+    Uses flexible selectors to handle minor UI changes.
     """
-    # Spotify might redirect a few times
-    time.sleep(1)
-
-    url = page.url
-    if "accounts.spotify.com" not in url and "login" not in url:
-        # Already logged in
-        return
-
-    eprint(f"[spotify_invite_bot] On login page: {url}")
-
     email = require_env("SPOTIFY_SERVICE_EMAIL")
     password = require_env("SPOTIFY_SERVICE_PASSWORD")
 
-    # Sometimes Spotify shows a "Log in" landing page with a button.
+    eprint("[spotify_invite_bot] Navigating to Spotify login page")
+    page.goto("https://accounts.spotify.com/en/login", wait_until="domcontentloaded", timeout=60000)
+
+    # Best-effort: dismiss cookie / consent banner if it exists
     try:
-        # If there's a "Log in" button that navigates to the real form, click it.
-        page.get_by_role("button", name="Log in").click(timeout=5000)
-        page.wait_for_timeout(1000)
+        cookie_button = page.get_by_role("button", name=re.compile("Accept|Agree", re.I))
+        cookie_button.click(timeout=3000)
+        page.wait_for_timeout(500)
+        eprint("[spotify_invite_bot] Clicked cookie consent button")
     except Exception:
-        pass  # best effort
+        pass
 
-    # Fill the form – these selectors are based on Spotify's current login page.
-    # You might need to tweak if they change the DOM.
-    page.fill('input#login-username', email)
-    page.fill('input#login-password', password)
-
-    # The main login button
-    page.click('button#login-button')
-
-    # Wait for redirect back to open.spotify.com
+    # Sometimes there's a "Log in" button before the actual form
     try:
-        page.wait_for_url("**open.spotify.com**", timeout=30000)
+        login_btn = page.get_by_role("button", name=re.compile("Log in", re.I))
+        login_btn.click(timeout=3000)
+        page.wait_for_timeout(1000)
+        eprint("[spotify_invite_bot] Clicked preliminary 'Log in' button")
+    except Exception:
+        pass
+
+    # Find the username/email input using multiple possible attributes
+    username_locator = page.locator(
+        'input#login-username, input[name="username"], input[autocomplete="username"], input[type="text"]'
+    ).first
+
+    try:
+        username_locator.wait_for(state="visible", timeout=30000)
+    except PlaywrightTimeoutError:
+        eprint("[spotify_invite_bot] Could not find username field on login page")
+        eprint("[spotify_invite_bot] Current URL:", page.url)
+        sys.exit(1)
+
+    username_locator.fill(email)
+
+    # Find the password input similarly
+    password_locator = page.locator(
+        'input#login-password, input[name="password"], input[autocomplete="current-password"], input[type="password"]'
+    ).first
+
+    try:
+        password_locator.wait_for(state="visible", timeout=30000)
+    except PlaywrightTimeoutError:
+        eprint("[spotify_invite_bot] Could not find password field on login page")
+        eprint("[spotify_invite_bot] Current URL:", page.url)
+        sys.exit(1)
+
+    password_locator.fill(password)
+
+    # Click the main "Log in" button (by role + name or fallback to submit button)
+    try:
+        login_button = page.get_by_role("button", name=re.compile("Log in", re.I))
+    except Exception:
+        login_button = page.locator('button[type="submit"]').first
+
+    login_button.click()
+    eprint("[spotify_invite_bot] Submitted login form, waiting for redirect...")
+
+    try:
+        page.wait_for_url("**open.spotify.com**", timeout=60000)
     except PlaywrightTimeoutError:
         eprint("[spotify_invite_bot] Login did not redirect to open.spotify.com in time")
-        # Still try to save state so next run might skip some steps
-        context.storage_state(path=AUTH_STATE_PATH)
-        return
+        # Still continue; some flows might keep us on accounts domain briefly
 
-    # Save auth state so future runs don't have to log in
-    context.storage_state(path=AUTH_STATE_PATH)
-    eprint("[spotify_invite_bot] Login successful and auth state saved")
+    eprint("[spotify_invite_bot] Login complete as service account (URL: %s)" % page.url)
 
 
 def open_playlist_and_get_invite_link(page, playlist_id: str) -> str:
-    """
-    Opens the collaborative playlist page and clicks:
-      • More options (three dots)
-      • Invite collaborators
-      • Copy link
-    Then reads the clipboard via JS and returns the link.
-    """
     target_url = PLAYLIST_BASE_URL + playlist_id
     eprint(f"[spotify_invite_bot] Opening {target_url}")
     page.goto(target_url, wait_until="networkidle", timeout=60000)
 
-    # If we got bounced to login, handle that.
-    if "login" in page.url or "accounts.spotify.com" in page.url:
-        login_if_needed(page, page.context)
-        # Go back to the playlist page after login
-        eprint("[spotify_invite_bot] Reloading playlist after login")
-        page.goto(target_url, wait_until="networkidle", timeout=60000)
-
-    # Give it a moment for all React bits to settle
+    # Small wait for React to fully settle
     page.wait_for_timeout(2000)
 
-    # Try to locate the "More options" (three dots) button.
-    # We'll try a few strategies in order.
-    more_button = None
+    # Click playlist-level "More options"
     try:
-        more_button = page.get_by_label("More options")
-    except Exception:
-        pass
-
-    if not more_button:
-        try:
-            more_button = page.get_by_role("button", name="More options")
-        except Exception:
-            pass
-
-    if not more_button:
-        try:
-            # Fallback: any button that has an aria-label with "More"
-            more_button = page.locator('button[aria-label*="More"]')
-        except Exception:
-            pass
-
-    if not more_button:
-        eprint("[spotify_invite_bot] Could not find 'More options' button")
+        action_bar = page.get_by_test_id("action-bar-row")
+        more_button = action_bar.get_by_test_id("more-button").first
+    except Exception as e:
+        eprint(f"[spotify_invite_bot] Could not find playlist action-bar more button: {e}")
         sys.exit(1)
 
     more_button.click()
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(800)
 
-    # Click "Invite collaborators"
-    # Text might change slightly, so we use partial match and case-insensitive.
-    invite_item = None
-    try:
-        invite_item = page.get_by_text("Invite collaborators", exact=False)
-    except Exception:
-        pass
+    # Read menu items and pick the one with "invite"
+    menu_items_locator = page.locator('[role="menuitem"]')
+    menu_texts = menu_items_locator.all_text_contents()
+    eprint("[spotify_invite_bot] Menu items:", menu_texts)
 
-    if not invite_item:
-        eprint("[spotify_invite_bot] Could not find 'Invite collaborators' menu item")
+    invite_index = None
+    for idx, text in enumerate(menu_texts):
+        if "invite" in text.lower():
+            invite_index = idx
+            break
+
+    if invite_index is None:
+        eprint("[spotify_invite_bot] Could not find any menu item with 'invite' in the text")
         sys.exit(1)
 
+    invite_item = menu_items_locator.nth(invite_index)
+    eprint(f"[spotify_invite_bot] Clicking invite menu item: {menu_texts[invite_index]!r}")
     invite_item.click()
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(800)
 
     # Click "Copy link"
     copy_item = None
@@ -163,7 +166,6 @@ def open_playlist_and_get_invite_link(page, playlist_id: str) -> str:
     copy_item.click()
     page.wait_for_timeout(500)
 
-    # Ensure we have clipboard perms and read from clipboard via JS
     page.context.grant_permissions(
         ["clipboard-read", "clipboard-write"],
         origin="https://open.spotify.com",
@@ -181,7 +183,6 @@ def open_playlist_and_get_invite_link(page, playlist_id: str) -> str:
 
     link = link.strip()
     eprint(f"[spotify_invite_bot] Got invite link: {link}")
-
     return link
 
 
@@ -195,31 +196,25 @@ def main():
         eprint("Empty playlist_id")
         sys.exit(1)
 
-    # Basic sanity check: Spotify playlist IDs are 22 characters usually,
-    # but we won't be too strict here.
     if "/" in playlist_id or "http" in playlist_id:
         eprint("Please pass only the raw playlist ID, not a full URL")
         sys.exit(1)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
-        context_kwargs = {}
-
-        # Reuse saved auth state if it exists
-        if AUTH_STATE_PATH.exists():
-            eprint(f"[spotify_invite_bot] Using existing auth state: {AUTH_STATE_PATH}")
-            context_kwargs["storage_state"] = str(AUTH_STATE_PATH)
-
-        context = browser.new_context(**context_kwargs)
+        context = browser.new_context()
         page = context.new_page()
 
         try:
+            # 1) Log in as the service account
+            login_with_service_account(page, context)
+
+            # 2) Now open the playlist *as that account*
             invite_link = open_playlist_and_get_invite_link(page, playlist_id)
         finally:
             context.close()
             browser.close()
 
-    # IMPORTANT: print ONLY the link to stdout so Django can read it cleanly
     print(invite_link)
 
 
