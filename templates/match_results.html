@@ -75,6 +75,56 @@
       -webkit-backdrop-filter: blur(3px);
     }
 
+    .instructions-block{
+      margin-top:1.5rem;
+      padding:1.25rem 1.5rem;
+      border-radius:14px;
+      border:1px solid var(--border);
+      background:#0b0b0b;
+    }
+    .instructions-block h2{
+      margin:0 0 .5rem;
+      font-size:1.35rem;
+      font-weight:800;
+    }
+    .instructions-block p{
+      margin:0;
+      line-height:1.55;
+      color:var(--muted);
+      max-width:none; /* let it stretch full width of the box */
+    }
+
+    .toolbar {
+      margin: 1rem 0;
+      display: flex;
+      flex-direction: column;
+      gap: .6rem;
+    }
+
+    /* Row that holds ONLY the two buttons */
+    .toolbar-buttons {
+      display: flex;
+      gap: .6rem;
+      align-items: stretch; /* same height */
+    }
+
+    /* Make both buttons the same width + centered text */
+    .toolbar-buttons .btn {
+      flex: 1 1 0;        /* equal width */
+      min-width: 220px;
+      text-align: center;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    /* On small screens, stack them but keep them equal */
+    @media (max-width: 600px) {
+      .toolbar-buttons {
+        flex-direction: column;
+      }
+    }
+
     .row{ display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
     .muted{ color:var(--muted); }
     .ok{ color:var(--ok); }
@@ -82,6 +132,8 @@
 
     /* Buttons */
     .btn{
+      font-size: 1rem !important;
+      line-height: 1.2 !important;
       padding:.85rem 1.2rem;
       border-radius:12px;
       border:none;
@@ -155,12 +207,11 @@
 
       {% if playlist_url %}
         <section class="instructions-block"
-                aria-label="Important instructions to own your playlist"
-                style="margin-top:1.5rem;">
-          <h2 style="margin:0 0 .5rem; font-size:1.35rem; font-weight:800;">
+                 aria-label="Important instructions to own your playlist">
+          <h2>
             Important instructions to own your playlist
           </h2>
-          <p class="muted" style="max-width:640px; line-height:1.5;">
+          <p>
             After clicking the "Join this playlist on Spotify" button, make sure to
             save the playlist to your library by clicking the three dots in spotify and
             selecting "Save to Your Library". THIS ALONE WILL NOT GIVE YOU OWNERSHIP OF THE PLAYLIST.
@@ -173,20 +224,25 @@
       {% endif %}
 
       <div class="toolbar">
-        {% if playlist_url %}
-          <a class="btn"
-             href="{{ playlist_url }}"
-             target="_blank"
-             rel="noopener">
-            Join this playlist on Spotify
-          </a>
-        {% endif %}
+        <div class="toolbar-buttons">
+          {% if playlist_url %}
+            <a class="btn"
+               href="{{ playlist_url }}"
+               target="_blank"
+               rel="noopener">
+              Join this playlist on Spotify
+            </a>
+          {% endif %}
 
-        <!-- One-click CSV download -->
-        <button id="csvBtn" class="btn" type="button"
-                data-url="{% url 'match_report_csv' job_id=job_id %}">
-          Download CSV report
-        </button>
+          <!-- One-click CSV download -->
+          <button id="csvBtn" class="btn" type="button"
+                  data-url="{% url 'match_report_csv' job_id=job_id %}">
+            Download CSV report
+          </button>
+        </div>
+
+        <span class="muted">Scroll to review; unmatched are highlighted.</span>
+      </div>
 
         <span class="muted">Scroll to review; unmatched are highlighted.</span>
       </div>
